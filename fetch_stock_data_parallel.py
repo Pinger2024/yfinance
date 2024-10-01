@@ -1,6 +1,5 @@
 import yfinance as yf
 from pymongo import MongoClient
-from pymongo.server_api import ServerApi
 import pandas as pd
 import time
 import logging
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection (using Render's internal hostname)
 uri = "mongodb://mongodb-9iyq:27017"  # Internal connection string for MongoDB on Render
-client = MongoClient(uri, server_api=ServerApi('1'))  # Specifying MongoDB API version 1
+client = MongoClient(uri)  # Removed ServerApi
 db = client['StockData']  # The database will be created if it doesn't exist
 collection = db['comprehensive_data']
 
@@ -136,6 +135,6 @@ if __name__ == "__main__":
         tickers_list = all_tickers.dropna().tolist()
 
         # Fetch data using threading
-        fetch_data_in_parallel(tickers_list, max_workers=10)
+        fetch_data_in_parallel(tickers_list, max_workers=20)
     else:
         logger.error("Script aborted due to MongoDB connection failure.")
