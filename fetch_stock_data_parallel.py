@@ -121,20 +121,20 @@ def fetch_data_in_parallel(tickers, max_workers=10):
 if __name__ == "__main__":
     # Check MongoDB connection before proceeding
     if check_mongo_connection():
-        # Load tickers from your CSV files
-        uk_stocks = pd.read_csv('/Users/michaeljames/Downloads/Stock Screener_UK.csv')['Symbol']
-        us_stocks = pd.read_csv('/Users/michaeljames/Downloads/Stock Screener_2024-09-30 (3).csv')['Symbol']
+        # Load tickers from the CSV files stored in the GitHub repo (in the same directory)
+        uk_stocks = pd.read_csv('Stock Screener_UK.csv')['Symbol']
+        us_stocks = pd.read_csv('Stock Screener_2024-09-30 (3).csv')['Symbol']
 
         # Combine the tickers
         all_tickers = pd.concat([us_stocks, uk_stocks], ignore_index=True)
 
         # Save combined tickers to a CSV file (optional)
-        all_tickers.to_csv('/Users/michaeljames/Downloads/combined_tickers.csv', index=False)
+        all_tickers.to_csv('combined_tickers.csv', index=False)
 
         # Convert tickers to a list and drop any NaN values
         tickers_list = all_tickers.dropna().tolist()
 
         # Fetch data using threading
-        fetch_data_in_parallel(tickers_list, max_workers=20)
+        fetch_data_in_parallel(tickers_list, max_workers=10)
     else:
         logger.error("Script aborted due to MongoDB connection failure.")
