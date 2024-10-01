@@ -1,8 +1,8 @@
 import yfinance as yf
 from pymongo import MongoClient
 import pandas as pd
-import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -69,25 +69,22 @@ def fetch_and_store_ticker_data(ticker):
     failed_tickers.append(ticker)  # Mark as failed if all periods fail
     return False
 
-# Rate-limited process to fetch data in batches
-def fetch_data_in_batches(tickers, batch_size=100, delay=60):
-    total_batches = (len(tickers) + batch_size - 1) // batch_size
-    for i in range(0, len(tickers), batch_size):
-        batch_number = i // batch_size + 1
-        batch = tickers[i:i + batch_size]
-        logging.info(f"Processing batch {batch_number}/{total_batches}")
-        for ticker in batch:
-            success = fetch_and_store_ticker_data(ticker)
-            if not success:
-                logging.warning(f"Encountered error with {ticker}, skipping for now.")
-        if i + batch_size < len(tickers):
-            logging.info(f"Batch {batch_number} completed, sleeping for {delay} seconds...")
-            time.sleep(delay)
-    logging.info("All batches processed.")
+# Function to fetch data in parallel using ThreadPoolExecutor
+def fetch_data_in_parallel(tickers, max_workers=10):
+    total_tickers = len(tickers)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ticker = {executor.submit(fetch_and_store_ticker_data, ticker): ticker for ticker in tickers}
+        
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                future.result()
+            except Exception as exc:
+                logging.error(f"{ticker} generated an exception: {exc}")
 
     # Summary message at the end
     logging.info("\n\n=== SUMMARY ===")
-    logging.info(f"Total tickers expected: {len(tickers)}")
+    logging.info(f"Total tickers expected: {total_tickers}")
     logging.info(f"Successfully fetched data for: {len(successful_tickers)} tickers")
     logging.info(f"Failed to fetch data for: {len(failed_tickers)} tickers")
 
@@ -105,5 +102,6 @@ if __name__ == "__main__":
     # Combine and drop duplicates
     all_tickers = pd.concat([us_stocks, uk_stocks]).drop_duplicates().tolist()
 
-    # Fetch data in batches
-    fetch_data_in_batches(all_tickers)
+    # Fetch data in parallel
+    fetch_data_in_parallel(all_tickers)
+
