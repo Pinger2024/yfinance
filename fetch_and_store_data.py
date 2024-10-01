@@ -96,11 +96,12 @@ def fetch_data_in_batches(tickers, batch_size=100, delay=60):
 
 if __name__ == "__main__":
     # Load tickers from CSV files
-    us_stocks = pd.read_csv('path_to_us_csv')['Symbol']
-    uk_stocks = pd.read_csv('path_to_uk_csv')['Symbol']
+    uk_stocks = pd.read_csv('Stock Screener_UK.csv')['Symbol']
+    us_stocks = pd.read_csv('Stock Screener_2024-09-30 (3).csv')['Symbol']
 
     # Combine and drop duplicates
     all_tickers = pd.concat([us_stocks, uk_stocks]).drop_duplicates().tolist()
 
     # Fetch data in batches
     fetch_data_in_batches(all_tickers)
+
