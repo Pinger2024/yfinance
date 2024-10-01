@@ -5,7 +5,7 @@ import pytz
 import logging
 
 # MongoDB connection
-client = MongoClient("your-mongo-uri")
+client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 collection = db['ohlcv_data']
 
