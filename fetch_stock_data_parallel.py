@@ -6,7 +6,6 @@ import time
 import logging
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from requests.exceptions import HTTPError
 
 # Configure logging
 logging.basicConfig(
@@ -18,10 +17,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# MongoDB connection (replace placeholders with your actual credentials)
-uri = "mongodb+srv://Cluster92274:e0NJV3BKe1Jq@cluster92274.dmm5f.mongodb.net/stock_database?retryWrites=true&w=majority&appName=Cluster92274"
+# MongoDB connection (using Render's internal hostname)
+uri = "mongodb://mongodb-9iyq:27017"  # Internal connection string for MongoDB on Render
 client = MongoClient(uri, server_api=ServerApi('1'))
-db = client['stock_database']
+db = client['StockData']  # The database will be created if it doesn't exist
 collection = db['comprehensive_data']
 
 # Create a unique index to prevent duplicates
@@ -63,16 +62,12 @@ def fetch_and_store_ticker_data(ticker):
         balance_sheet = convert_keys_to_string(stock.balance_sheet.T.to_dict() if not stock.balance_sheet.empty else {})
         cashflow = convert_keys_to_string(stock.cashflow.T.to_dict() if not stock.cashflow.empty else {})
         
-        # Fetch analyst recommendations (handling 404 errors)
         try:
             recommendations = stock.recommendations_summary
             analyst_recommendations = convert_keys_to_string(recommendations.to_dict()) if recommendations is not None else {}
-        except HTTPError as http_err:
-            if http_err.response.status_code == 404:
-                logger.warning(f"No recommendations found for {ticker} (404 error). Skipping recommendations.")
-                analyst_recommendations = {}
-            else:
-                raise http_err
+        except Exception as e:
+            logger.warning(f"Could not fetch recommendations for {ticker}: {e}")
+            analyst_recommendations = {}
 
         for date, row in hist.iterrows():
             data = {
