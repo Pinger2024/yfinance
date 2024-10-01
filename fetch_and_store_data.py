@@ -30,6 +30,15 @@ try:
 except Exception as e:
     logger.error(f"Failed to create indexes: {e}")
 
+# Function to recursively convert keys to strings
+def convert_keys_to_string(data):
+    if isinstance(data, dict):
+        return {str(key): convert_keys_to_string(value) for key, value in data.items()}
+    elif isinstance(data, list):
+        return [convert_keys_to_string(item) for item in data]
+    else:
+        return data
+
 # Function to fetch and store OHLCV data
 def fetch_and_store_ohlcv_data(ticker):
     logger.info(f"Fetching OHLCV data for {ticker}")
@@ -69,9 +78,9 @@ def fetch_and_store_meta_data(ticker):
     
     try:
         # Fetch non-daily meta data
-        financials = stock.financials.T.to_dict() if not stock.financials.empty else {}
-        balance_sheet = stock.balance_sheet.T.to_dict() if not stock.balance_sheet.empty else {}
-        cashflow = stock.cashflow.T.to_dict() if not stock.cashflow.empty else {}
+        financials = convert_keys_to_string(stock.financials.T.to_dict() if not stock.financials.empty else {})
+        balance_sheet = convert_keys_to_string(stock.balance_sheet.T.to_dict() if not stock.balance_sheet.empty else {})
+        cashflow = convert_keys_to_string(stock.cashflow.T.to_dict() if not stock.cashflow.empty else {})
         dividends = stock.dividends.to_dict() if not stock.dividends.empty else {}
         splits = stock.splits.to_dict() if not stock.splits.empty else {}
         recommendations = stock.recommendations_summary.to_dict() if stock.recommendations_summary is not None else {}
