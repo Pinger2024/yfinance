@@ -25,46 +25,49 @@ def fetch_and_store_ticker_data(ticker):
     logging.info(f"Fetching data for {ticker}")
     stock = yf.Ticker(ticker)
 
-    try:
-        # Fetch historical OHLCV data
-        hist = stock.history(period="2y")
+    periods = ['2y', '1y', '6mo']  # Trying multiple periods as a fallback
+    for period in periods:
+        try:
+            # Fetch historical OHLCV data for the current period
+            hist = stock.history(period=period)
 
-        # Skip if no data found
-        if hist.empty:
-            logging.warning(f"No data found for {ticker}, possibly delisted or unavailable.")
-            failed_tickers.append(ticker)  # Mark as failed
-            return False
+            # Skip if no data found
+            if hist.empty:
+                logging.warning(f"No data found for {ticker} with period {period}, possibly delisted or unavailable.")
+                continue  # Try the next period
 
-        # Store the OHLCV data in MongoDB
-        for date, row in hist.iterrows():
-            data = {
-                'ticker': ticker,
-                'date': date,
-                'open': row['Open'],
-                'high': row['High'],
-                'low': row['Low'],
-                'close': row['Close'],
-                'volume': row['Volume']
-            }
-            try:
-                ohlcv_collection.update_one(
-                    {'ticker': ticker, 'date': data['date']},
-                    {'$set': data},
-                    upsert=True
-                )
-            except Exception as e:
-                logging.error(f"Error inserting data for {ticker} on {date}: {e}")
-                failed_tickers.append(ticker)  # Mark as failed if insertion fails
-                return False
+            # Store the OHLCV data in MongoDB
+            for date, row in hist.iterrows():
+                data = {
+                    'ticker': ticker,
+                    'date': date,
+                    'open': row['Open'],
+                    'high': row['High'],
+                    'low': row['Low'],
+                    'close': row['Close'],
+                    'volume': row['Volume']
+                }
+                try:
+                    ohlcv_collection.update_one(
+                        {'ticker': ticker, 'date': data['date']},
+                        {'$set': data},
+                        upsert=True
+                    )
+                except Exception as e:
+                    logging.error(f"Error inserting data for {ticker} on {date}: {e}")
+                    failed_tickers.append(ticker)
+                    return False
 
-        logging.info(f"Successfully stored data for {ticker}")
-        successful_tickers.append(ticker)  # Mark as success
-        return True
+            logging.info(f"Successfully stored data for {ticker} with period {period}")
+            successful_tickers.append(ticker)
+            return True
 
-    except Exception as e:
-        logging.error(f"Error fetching data for {ticker}: {e}")
-        failed_tickers.append(ticker)  # Mark as failed
-        return False
+        except Exception as e:
+            logging.error(f"Error fetching data for {ticker} with period {period}: {e}")
+
+    logging.warning(f"Encountered error with {ticker}, skipping for now.")
+    failed_tickers.append(ticker)  # Mark as failed if all periods fail
+    return False
 
 # Rate-limited process to fetch data in batches
 def fetch_data_in_batches(tickers, batch_size=100, delay=60):
@@ -104,4 +107,3 @@ if __name__ == "__main__":
 
     # Fetch data in batches
     fetch_data_in_batches(all_tickers)
-
