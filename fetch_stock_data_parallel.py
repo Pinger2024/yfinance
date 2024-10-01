@@ -19,12 +19,16 @@ logger = logging.getLogger(__name__)
 
 # MongoDB connection (using Render's internal hostname)
 uri = "mongodb://mongodb-9iyq:27017"  # Internal connection string for MongoDB on Render
-client = MongoClient(uri, server_api=ServerApi('1'))
+client = MongoClient(uri, server_api=ServerApi('1'))  # Specifying MongoDB API version 1
 db = client['StockData']  # The database will be created if it doesn't exist
 collection = db['comprehensive_data']
 
 # Create a unique index to prevent duplicates
-collection.create_index([('ticker', 1), ('date', 1)], unique=True)
+try:
+    collection.create_index([('ticker', 1), ('date', 1)], unique=True)
+    logger.info("Index created successfully")
+except Exception as e:
+    logger.error(f"Failed to create index: {e}")
 
 # Function to check MongoDB connection
 def check_mongo_connection():
