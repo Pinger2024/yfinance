@@ -1,6 +1,5 @@
-import yfinance as yf
-from pymongo import MongoClient
 import pandas as pd
+from pymongo import MongoClient
 import numpy as np
 
 # MongoDB connection (hardcoded)
@@ -14,31 +13,35 @@ benchmark_ticker = '^GSPC'
 
 # Load benchmark data from MongoDB
 benchmark_data = list(ohlcv_collection.find({"ticker": benchmark_ticker}).sort("date", 1))
-
-# Convert benchmark data to a pandas DataFrame
 benchmark_df = pd.DataFrame(benchmark_data)
+benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
 
 # Function to normalize RS score to 1-99 range
 def normalize_rs_score(rs_raw, max_score, min_score):
     return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
 
 # Function to calculate relative strength (RS) score based on multiple periods
-def calculate_rs_score(ticker_data, benchmark_data):
+def calculate_rs_score(merged_df):
     # Define periods and weights
-    periods = [63, 126, 189, 252]  # Corresponds to 3 months, 6 months, etc.
+    periods = [63, 126, 189, 252]  # Corresponds to ~3 months, 6 months, etc.
     weights = [2, 1, 1, 1]  # Weights for each period, as per the Pine Script
 
     rs_values = []
     for period in periods:
-        if len(ticker_data) >= period and len(benchmark_data) >= period:
+        if len(merged_df) >= period + 1:
             # Calculate RS over this period
-            rs_value = (ticker_data['close'].iloc[-1] / ticker_data['close'].iloc[-period]) - (benchmark_data['close'].iloc[-1] / benchmark_data['close'].iloc[-period])
+            current_ticker_close = merged_df['close_ticker'].iloc[-1]
+            previous_ticker_close = merged_df['close_ticker'].iloc[-period-1]
+            current_benchmark_close = merged_df['close_benchmark'].iloc[-1]
+            previous_benchmark_close = merged_df['close_benchmark'].iloc[-period-1]
+
+            rs_value = (current_ticker_close / previous_ticker_close) - (current_benchmark_close / previous_benchmark_close)
             rs_values.append(rs_value)
         else:
             rs_values.append(0.0)  # Default value if not enough data
 
     # Calculate raw RS score
-    rs_raw = sum([rs_values[i] * weights[i] for i in range(4)])
+    rs_raw = sum([rs_values[i] * weights[i] for i in range(len(periods))])
 
     # Calculate max and min scores for normalization
     max_score = sum(weights)
@@ -53,14 +56,18 @@ def calculate_rs_score(ticker_data, benchmark_data):
     return rs_score
 
 # Function to detect new RS highs
-def detect_new_rs_high(ticker, ticker_data, benchmark_data):
-    # Calculate RS line (current RS line = close / benchmark close)
-    rs_line = ticker_data['close'].iloc[-1] / benchmark_data['close'].iloc[-1]
-    
-    # Check if this is a new high
-    if len(ticker_data) >= 252:  # Ensure we have enough data to compare
-        rs_high = max(ticker_data['close'] / benchmark_data['close'])
-        if rs_line > rs_high:
+def detect_new_rs_high(merged_df, lookback=40):
+    # Ensure we have enough data
+    if len(merged_df) >= lookback + 1:
+        # Calculate RS line
+        merged_df['rs_line'] = merged_df['close_ticker'] / merged_df['close_benchmark']
+        rs_line = merged_df['rs_line']
+        # Get RS line for the lookback period excluding the current value
+        rs_line_lookback = rs_line.iloc[-lookback-1:-1]
+        current_rs = rs_line.iloc[-1]
+        rs_high = rs_line_lookback.max()
+        # Check if current RS Line is greater than previous highs
+        if current_rs > rs_high:
             return True
     return False
 
@@ -77,29 +84,39 @@ for ticker in tickers:
     if len(ticker_data) > 0:
         # Convert to pandas DataFrame
         ticker_df = pd.DataFrame(ticker_data)
+        ticker_df['date'] = pd.to_datetime(ticker_df['date'])
 
-        # Calculate RS score
-        rs_score = calculate_rs_score(ticker_df, benchmark_df)
-        
-        # Detect new RS high
-        new_rs_high = detect_new_rs_high(ticker, ticker_df, benchmark_df)
-        
-        # Store RS score and whether it's a new RS high in the indicators collection
-        indicator_data = {
-            "ticker": ticker,
-            "rs_score": rs_score,
-            "new_rs_high": new_rs_high,
-            "date": pd.to_datetime('today')  # Store the current date
-        }
+        # Merge on date
+        merged_df = pd.merge(ticker_df[['date', 'close']], benchmark_df[['date', 'close']], on='date', suffixes=('_ticker', '_benchmark'), how='inner')
 
-        # Insert into indicators collection
-        indicators_collection.update_one(
-            {"ticker": ticker},
-            {"$set": indicator_data},
-            upsert=True
-        )
+        # Ensure the data is sorted by date
+        merged_df = merged_df.sort_values('date').reset_index(drop=True)
 
-        print(f"Stored RS score for {ticker}: {rs_score}, New RS High: {new_rs_high}")
+        if len(merged_df) >= 1:
+            # Calculate RS score
+            rs_score = calculate_rs_score(merged_df)
+            
+            # Detect new RS high
+            new_rs_high = detect_new_rs_high(merged_df)
+            
+            # Store RS score and whether it's a new RS high in the indicators collection
+            indicator_data = {
+                "ticker": ticker,
+                "rs_score": rs_score,
+                "new_rs_high": new_rs_high,
+                "date": pd.to_datetime('today')  # Store the current date
+            }
+
+            # Insert into indicators collection
+            indicators_collection.update_one(
+                {"ticker": ticker},
+                {"$set": indicator_data},
+                upsert=True
+            )
+
+            print(f"Stored RS score for {ticker}: {rs_score}, New RS High: {new_rs_high}")
+        else:
+            print(f"No merged data available for {ticker}")
     else:
         print(f"No data found for {ticker}")
 
