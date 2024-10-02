@@ -86,7 +86,7 @@ def calculate_and_store_relative_strength():
 
             # Detect new RS highs
             previous_rs_high = indicators_collection.find_one({"ticker": ticker}, {"new_rs_high": 1})
-            new_rs_high = rs_score > previous_rs_high.get('new_rs_high', -np.inf)
+            new_rs_high = bool(rs_score > previous_rs_high.get('new_rs_high', -np.inf))
 
             # Store RS score and new RS high status
             indicator_data = {
