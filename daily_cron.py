@@ -5,7 +5,7 @@ import yfinance as yf
 import logging
 
 # MongoDB connection (hardcoded)
-client = MongoClient("your-mongo-uri")
+client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 collection = db['ohlcv_data']
 
