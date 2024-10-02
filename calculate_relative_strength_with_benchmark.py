@@ -1,7 +1,5 @@
-import yfinance as yf
-from pymongo import MongoClient
 import pandas as pd
-import numpy as np
+from pymongo import MongoClient
 
 # MongoDB connection (hardcoded)
 client = MongoClient("mongodb://mongodb-9iyq:27017")
@@ -15,41 +13,8 @@ tickers = ['TXN', 'STM', 'KGS', 'MPC', 'CMRE', 'MASI', 'OXY', 'TSLA', 'BABA']
 # Benchmark ticker for S&P 500 (^GSPC)
 benchmark_ticker = '^GSPC'
 
-# Fetch 2 years of benchmark data from Yahoo Finance and store in MongoDB
-def fetch_and_store_benchmark_data(ticker):
-    print(f"Fetching 2 years of benchmark data for {ticker}")
-    stock = yf.Ticker(ticker)
-    hist = stock.history(period="2y")  # Fetch 2 years of data
-    
-    if not hist.empty:
-        # Convert the data to MongoDB format
-        for date, row in hist.iterrows():
-            data = {
-                "ticker": ticker,
-                "date": date.to_pydatetime(),
-                "open": row['Open'],
-                "high": row['High'],
-                "low": row['Low'],
-                "close": row['Close'],
-                "volume": row['Volume']
-            }
-            # Store the data in the ohlcv_data collection
-            ohlcv_collection.update_one(
-                {"ticker": ticker, "date": data["date"]},
-                {"$set": data},
-                upsert=True
-            )
-        print(f"Benchmark data for {ticker} stored successfully.")
-    else:
-        print(f"No data found for {ticker}.")
-
-# Fetch and store 2 years of benchmark data (only once)
-fetch_and_store_benchmark_data(benchmark_ticker)
-
 # Load benchmark data from MongoDB
 benchmark_data = list(ohlcv_collection.find({"ticker": benchmark_ticker}).sort("date", 1))
-
-# Convert benchmark data to a pandas DataFrame
 benchmark_df = pd.DataFrame(benchmark_data)
 
 # Function to normalize RS score to 1-99 range
@@ -82,6 +47,11 @@ def calculate_rs_score(ticker_data, benchmark_data):
     rs_score = normalize_rs_score(rs_raw, max_score, min_score)
     return rs_score
 
+# Function to detect new RS line highs (blue dot)
+def detect_new_rs_high(rs_series, lookback=40):
+    recent_high = rs_series.rolling(window=lookback).max()
+    return rs_series.iloc[-1] >= recent_high.iloc[-1]
+
 # Iterate over tickers and calculate RS
 for ticker in tickers:
     print(f"Processing ticker: {ticker}")
@@ -96,10 +66,17 @@ for ticker in tickers:
         # Calculate RS score
         rs_score = calculate_rs_score(ticker_df, benchmark_df)
         
-        # Store RS score in the indicators collection
+        # Calculate RS line (price relative to benchmark)
+        rs_line = ticker_df['close'] / benchmark_df['close']
+        
+        # Detect if the RS line is making a new high (blue dot)
+        rs_new_high = detect_new_rs_high(rs_line)
+
+        # Store RS score and new RS high flag in the indicators collection
         indicator_data = {
             "ticker": ticker,
             "rs_score": rs_score,
+            "rs_new_high": rs_new_high,  # Boolean indicating if a new RS high was detected
             "date": pd.to_datetime('today')  # Store the current date
         }
 
@@ -110,8 +87,8 @@ for ticker in tickers:
             upsert=True
         )
 
-        print(f"Stored RS score for {ticker}: {rs_score}")
+        print(f"Stored RS score and new high detection for {ticker}")
     else:
         print(f"No data found for {ticker}")
 
-print("Relative strength score calculation complete.")
+print("Relative strength score calculation and RS new high detection complete.")
