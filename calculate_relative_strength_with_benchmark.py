@@ -70,7 +70,7 @@ for ticker in tickers:
         rs_line = ticker_df['close'] / benchmark_df['close']
         
         # Detect if the RS line is making a new high (blue dot)
-        rs_new_high = detect_new_rs_high(rs_line)
+        rs_new_high = bool(detect_new_rs_high(rs_line))  # Convert to standard Python boolean
 
         # Store RS score and new RS high flag in the indicators collection
         indicator_data = {
