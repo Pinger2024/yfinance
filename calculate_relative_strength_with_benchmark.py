@@ -1,5 +1,7 @@
-import pandas as pd
+import yfinance as yf
 from pymongo import MongoClient
+import pandas as pd
+import numpy as np
 
 # MongoDB connection (hardcoded)
 client = MongoClient("mongodb://mongodb-9iyq:27017")
@@ -7,14 +9,13 @@ db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
 
-# Test tickers
-tickers = ['TXN', 'STM', 'KGS', 'MPC', 'CMRE', 'MASI', 'OXY', 'TSLA', 'BABA']
-
 # Benchmark ticker for S&P 500 (^GSPC)
 benchmark_ticker = '^GSPC'
 
 # Load benchmark data from MongoDB
 benchmark_data = list(ohlcv_collection.find({"ticker": benchmark_ticker}).sort("date", 1))
+
+# Convert benchmark data to a pandas DataFrame
 benchmark_df = pd.DataFrame(benchmark_data)
 
 # Function to normalize RS score to 1-99 range
@@ -47,12 +48,10 @@ def calculate_rs_score(ticker_data, benchmark_data):
     rs_score = normalize_rs_score(rs_raw, max_score, min_score)
     return rs_score
 
-# Function to detect new RS line highs (blue dot)
-def detect_new_rs_high(rs_series, lookback=40):
-    recent_high = rs_series.rolling(window=lookback).max()
-    return rs_series.iloc[-1] >= recent_high.iloc[-1]
+# Fetch all unique tickers from the MongoDB database
+tickers = ohlcv_collection.distinct("ticker")
 
-# Iterate over tickers and calculate RS
+# Iterate over all tickers and calculate RS
 for ticker in tickers:
     print(f"Processing ticker: {ticker}")
 
@@ -66,17 +65,10 @@ for ticker in tickers:
         # Calculate RS score
         rs_score = calculate_rs_score(ticker_df, benchmark_df)
         
-        # Calculate RS line (price relative to benchmark)
-        rs_line = ticker_df['close'] / benchmark_df['close']
-        
-        # Detect if the RS line is making a new high (blue dot)
-        rs_new_high = bool(detect_new_rs_high(rs_line))  # Convert to standard Python boolean
-
-        # Store RS score and new RS high flag in the indicators collection
+        # Store RS score in the indicators collection
         indicator_data = {
             "ticker": ticker,
             "rs_score": rs_score,
-            "rs_new_high": rs_new_high,  # Boolean indicating if a new RS high was detected
             "date": pd.to_datetime('today')  # Store the current date
         }
 
@@ -87,8 +79,8 @@ for ticker in tickers:
             upsert=True
         )
 
-        print(f"Stored RS score and new high detection for {ticker}")
+        print(f"Stored RS score for {ticker}: {rs_score}")
     else:
         print(f"No data found for {ticker}")
 
-print("Relative strength score calculation and RS new high detection complete.")
+print("Relative strength score calculation complete.")
