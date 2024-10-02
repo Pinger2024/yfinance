@@ -1,87 +1,49 @@
-import yfinance as yf
 from pymongo import MongoClient
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
+import yfinance as yf
 import logging
 
-# MongoDB connection
-client = MongoClient("mongodb://mongodb-9iyq:27017")
+# MongoDB connection (hardcoded)
+client = MongoClient("your-mongo-uri")
 db = client['StockData']
 collection = db['ohlcv_data']
 
-# Set up logging
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Get today's date in UK time
-uk_tz = pytz.timezone('Europe/London')
-today = datetime.now(uk_tz).date()
-
-# Get unique tickers from the 'ohlcv_data' collection
-def get_unique_tickers():
-    try:
-        tickers = collection.distinct("ticker")
-        return tickers
-    except Exception as e:
-        logger.error(f"Error fetching tickers from the database: {e}")
-        return []
-
-# Fetch and store today's OHLCV data for each ticker
-def fetch_todays_data(ticker):
-    logger.info(f"Fetching today's data for {ticker}")
-    stock = yf.Ticker(ticker)
-
-    try:
-        # Fetch today's OHLCV data
-        hist = stock.history(period="1d")
-
-        # Check if we have today's data
-        if hist.empty or hist.index[0].date() != today:
-            logger.warning(f"No data found for {ticker} today, possibly delisted or unavailable.")
-            return False
-
-        # Extract data for today
-        row = hist.iloc[0]
-        data = {
-            'ticker': ticker,
-            'date': row.name.to_pydatetime(),
-            'open': row['Open'],
-            'high': row['High'],
-            'low': row['Low'],
-            'close': row['Close'],
-            'volume': row['Volume'],
-        }
-
-        # Store today's OHLCV data in the database
-        collection.update_one(
-            {'ticker': ticker, 'date': data['date']},
-            {'$set': data},
-            upsert=True
-        )
-        logger.info(f"Successfully stored today's data for {ticker}")
-    except Exception as e:
-        logger.error(f"Error fetching data for {ticker}: {e}")
-        return False
-    return True
-
-# Fetch today's data for all tickers in the database
-def fetch_all_tickers_data():
-    tickers = get_unique_tickers()
+def fetch_yesterdays_data():
+    tickers = collection.distinct("ticker")
     logger.info(f"Fetching data for {len(tickers)} tickers.")
 
-    success = True
+    # Get yesterday's date in UK time
+    uk_tz = pytz.timezone('Europe/London')
+    yesterday = datetime.now(uk_tz).date() - timedelta(days=1)
+
     for ticker in tickers:
-        if not fetch_todays_data(ticker):
-            success = False
+        try:
+            stock = yf.Ticker(ticker)
+            data = stock.history(period="1d", start=yesterday, end=yesterday + timedelta(days=1))
 
-    return success
+            if not data.empty:
+                row = data.iloc[0]
+                record = {
+                    'ticker': ticker,
+                    'date': row.name.to_pydatetime(),
+                    'open': row['Open'],
+                    'high': row['High'],
+                    'low': row['Low'],
+                    'close': row['Close'],
+                    'volume': row['Volume'],
+                }
+                collection.update_one({'ticker': ticker, 'date': record['date']}, {'$set': record}, upsert=True)
+                logger.info(f"Updated {ticker} with yesterday's data.")
+        except Exception as e:
+            logger.error(f"Error fetching data for {ticker}: {e}")
 
-# Example of how to run the cron job
 if __name__ == "__main__":
-    success = fetch_all_tickers_data()
+    fetch_yesterdays_data()
 
-    # Send email notification (success or failure)
-    if success:
-        notify_status(True)
-    else:
-        notify_status(False)
+    # Commenting out notify_status for now to avoid errors
+    # notify_status(True)
