@@ -13,27 +13,21 @@ collection = db['ohlcv_data']
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def fetch_yesterdays_data():
+def fetch_todays_data():
     tickers = collection.distinct("ticker")
     logger.info(f"Fetching data for {len(tickers)} tickers.")
 
-    # Get yesterday's date in UK time
+    # Get today's date in UK time
     uk_tz = pytz.timezone('Europe/London')
-    yesterday = datetime.now(uk_tz).date() - timedelta(days=1)
-    logger.info(f"Attempting to fetch data for date: {yesterday}")
+    today = datetime.now(uk_tz).date()
 
     for ticker in tickers:
         try:
             stock = yf.Ticker(ticker)
-            
-            # Add logging to see what dates are being requested
-            logger.info(f"Fetching data for {ticker} from {yesterday} to {yesterday + timedelta(days=1)}")
-
-            # Request data for the past week to debug if data fetching works
-            data = stock.history(period="5d")
+            data = stock.history(period="1d", start=today, end=today + timedelta(days=1))
 
             if data.empty:
-                logger.warning(f"No data found for {ticker}, possibly delisted or unavailable.")
+                logger.warning(f"No data found for {ticker} today, possibly due to a non-trading day.")
                 continue  # Skip to the next ticker
 
             # Safely access the data row
@@ -48,14 +42,9 @@ def fetch_yesterdays_data():
                 'volume': row['Volume'],
             }
             collection.update_one({'ticker': ticker, 'date': record['date']}, {'$set': record}, upsert=True)
-            logger.info(f"Updated {ticker} with data.")
-        except IndexError as e:
-            logger.error(f"Error fetching data for {ticker}: {e} - No data available.")
+            logger.info(f"Updated {ticker} with today's data.")
         except Exception as e:
             logger.error(f"Error fetching data for {ticker}: {e}")
 
 if __name__ == "__main__":
-    fetch_yesterdays_data()
-
-    # Commenting out notify_status for now to avoid errors
-    # notify_status(True)
+    fetch_todays_data()
