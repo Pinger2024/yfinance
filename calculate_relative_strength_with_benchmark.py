@@ -46,7 +46,23 @@ def calculate_rs_score(ticker_data, benchmark_data):
 
     # Normalize RS score to a range between 1-99
     rs_score = normalize_rs_score(rs_raw, max_score, min_score)
+    
+    # Ensure the RS score is within bounds 1 to 99
+    rs_score = max(1, min(99, rs_score))
+    
     return rs_score
+
+# Function to detect new RS highs
+def detect_new_rs_high(ticker, ticker_data, benchmark_data):
+    # Calculate RS line (current RS line = close / benchmark close)
+    rs_line = ticker_data['close'].iloc[-1] / benchmark_data['close'].iloc[-1]
+    
+    # Check if this is a new high
+    if len(ticker_data) >= 252:  # Ensure we have enough data to compare
+        rs_high = max(ticker_data['close'] / benchmark_data['close'])
+        if rs_line > rs_high:
+            return True
+    return False
 
 # Fetch all unique tickers from the MongoDB database
 tickers = ohlcv_collection.distinct("ticker")
@@ -65,10 +81,14 @@ for ticker in tickers:
         # Calculate RS score
         rs_score = calculate_rs_score(ticker_df, benchmark_df)
         
-        # Store RS score in the indicators collection
+        # Detect new RS high
+        new_rs_high = detect_new_rs_high(ticker, ticker_df, benchmark_df)
+        
+        # Store RS score and whether it's a new RS high in the indicators collection
         indicator_data = {
             "ticker": ticker,
             "rs_score": rs_score,
+            "new_rs_high": new_rs_high,
             "date": pd.to_datetime('today')  # Store the current date
         }
 
@@ -79,7 +99,7 @@ for ticker in tickers:
             upsert=True
         )
 
-        print(f"Stored RS score for {ticker}: {rs_score}")
+        print(f"Stored RS score for {ticker}: {rs_score}, New RS High: {new_rs_high}")
     else:
         print(f"No data found for {ticker}")
 
