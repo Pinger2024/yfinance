@@ -92,6 +92,21 @@ def check_new_rs_high(merged_df, lookback=40):
             return True
     return False
 
+# Function to convert numpy data types to native Python types
+def convert_numpy_types(data):
+    if isinstance(data, dict):
+        return {k: convert_numpy_types(v) for k, v in data.items()}
+    elif isinstance(data, np.bool_):
+        return bool(data)
+    elif isinstance(data, np.integer):
+        return int(data)
+    elif isinstance(data, np.floating):
+        return float(data)
+    elif isinstance(data, np.ndarray):
+        return data.tolist()
+    else:
+        return data
+
 # Function to calculate Minervini criteria
 def calculate_minervini_criteria(ticker_df):
     # Ensure 'close', 'high', and 'low' columns are floats
@@ -107,6 +122,10 @@ def calculate_minervini_criteria(ticker_df):
 
     # Get the latest values
     latest_data = ticker_df.iloc[-1]
+
+    # Handle possible NaN values
+    if pd.isnull(latest_data[['sma50', 'sma150', 'sma200', 'sma200_22']]).any():
+        return None  # Not enough data to calculate moving averages
 
     # Minervini criteria calculations
     is_price_above_sma_150_and_200 = (latest_data['close'] > latest_data['sma150']) and (latest_data['close'] > latest_data['sma200'])
@@ -131,31 +150,31 @@ def calculate_minervini_criteria(ticker_df):
 
     # Compile criteria
     minervini_criteria = {
-        'is_price_above_sma_150_and_200': is_price_above_sma_150_and_200,
-        'is_sma_150_above_sma_200': is_sma_150_above_sma_200,
-        'is_sma200_trending_up': is_sma200_trending_up,
-        'is_sma50_above_sma150_and_sma200': is_sma50_above_sma150_and_sma200,
-        'is_price_above_sma50': is_price_above_sma50,
-        'is_price_25_percent_above_52_week_low': is_price_25_percent_above_52_week_low,
-        'is_price_within_25_percent_of_52_week_high': is_price_within_25_percent_of_52_week_high,
-        'highest_price_52_week': highest_price,
-        'lowest_price_52_week': lowest_price,
-        'sma50': latest_data['sma50'],
-        'sma150': latest_data['sma150'],
-        'sma200': latest_data['sma200'],
+        'is_price_above_sma_150_and_200': bool(is_price_above_sma_150_and_200),
+        'is_sma_150_above_sma_200': bool(is_sma_150_above_sma_200),
+        'is_sma200_trending_up': bool(is_sma200_trending_up),
+        'is_sma50_above_sma150_and_sma200': bool(is_sma50_above_sma150_and_sma200),
+        'is_price_above_sma50': bool(is_price_above_sma50),
+        'is_price_25_percent_above_52_week_low': bool(is_price_25_percent_above_52_week_low),
+        'is_price_within_25_percent_of_52_week_high': bool(is_price_within_25_percent_of_52_week_high),
+        'highest_price_52_week': float(highest_price),
+        'lowest_price_52_week': float(lowest_price),
+        'sma50': float(latest_data['sma50']),
+        'sma150': float(latest_data['sma150']),
+        'sma200': float(latest_data['sma200']),
     }
 
     # Count how many criteria are met
     criteria_flags = [
-        is_price_above_sma_150_and_200,
-        is_sma_150_above_sma_200,
-        is_sma200_trending_up,
-        is_sma50_above_sma150_and_sma200,
-        is_price_above_sma50,
-        is_price_25_percent_above_52_week_low,
-        is_price_within_25_percent_of_52_week_high,
+        minervini_criteria['is_price_above_sma_150_and_200'],
+        minervini_criteria['is_sma_150_above_sma_200'],
+        minervini_criteria['is_sma200_trending_up'],
+        minervini_criteria['is_sma50_above_sma150_and_sma200'],
+        minervini_criteria['is_price_above_sma50'],
+        minervini_criteria['is_price_25_percent_above_52_week_low'],
+        minervini_criteria['is_price_within_25_percent_of_52_week_high'],
     ]
-    minervini_criteria['minervini_score'] = sum(criteria_flags)
+    minervini_criteria['minervini_score'] = int(sum(criteria_flags))
     minervini_criteria['meets_minervini_criteria'] = all(criteria_flags)
 
     return minervini_criteria
@@ -189,14 +208,22 @@ def calculate_and_store_relative_strength():
                 # Calculate Minervini criteria
                 minervini_criteria = calculate_minervini_criteria(ticker_df)
 
+                # Check if minervini_criteria is None (not enough data)
+                if minervini_criteria is None:
+                    print(f"Not enough data to calculate Minervini criteria for {ticker}")
+                    continue
+
                 # Store RS score, new RS high status, Minervini criteria, and moving averages
                 indicator_data = {
                     "ticker": ticker,
-                    "rs_score": min(max(rs_score, 1), 99),  # Ensure RS score is between 1 and 99
-                    "new_rs_high": new_rs_high,
+                    "rs_score": float(min(max(rs_score, 1), 99)),  # Ensure RS score is between 1 and 99
+                    "new_rs_high": bool(new_rs_high),
                     "date": pd.to_datetime('today'),
                     "minervini_criteria": minervini_criteria,
                 }
+
+                # Convert numpy data types to native Python types
+                indicator_data = convert_numpy_types(indicator_data)
 
                 indicators_collection.update_one(
                     {"ticker": ticker},
