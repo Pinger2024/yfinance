@@ -16,26 +16,24 @@ tickers = ohlcv_collection.distinct('ticker')
 # Benchmark ticker for S&P 500 (^GSPC)
 benchmark_ticker = '^GSPC'
 
-# Fetch the latest data for all tickers and store it in MongoDB
+# Fetch today's data for all tickers and store it in MongoDB
 def fetch_daily_ohlcv_data():
     for ticker in tickers:
         print(f"Fetching daily OHLCV data for {ticker}")
         stock = yf.Ticker(ticker)
-        # Use a 5-day lookback in case of missing data
-        recent_data = stock.history(period="5d")
+        today_data = stock.history(period="5d")  # Modified to get the last 5 days of data
 
-        if not recent_data.empty:
-            # Get the latest day's data from recent_data
-            today_data = recent_data.iloc[-1]
-            date = today_data.name.to_pydatetime()
+        if not today_data.empty:
+            date = today_data.index[-1].to_pydatetime()  # Get the latest available date
+            row = today_data.iloc[-1]
             data = {
                 "ticker": ticker,
                 "date": date,
-                "open": today_data['Open'],
-                "high": today_data['High'],
-                "low": today_data['Low'],
-                "close": today_data['Close'],
-                "volume": today_data['Volume']
+                "open": row['Open'],
+                "high": row['High'],
+                "low": row['Low'],
+                "close": row['Close'],
+                "volume": row['Volume']
             }
 
             # Store today's data in the collection
@@ -48,9 +46,13 @@ def fetch_daily_ohlcv_data():
         else:
             print(f"No data found for {ticker} on {datetime.now()}")
 
+# Function to normalize RS score to 1-99 range
+def normalize_rs_score(rs_raw, max_score, min_score):
+    return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
+
 # Function to calculate RS score based on multiple periods
 def calculate_rs_score(ticker_data, benchmark_data):
-    periods = [63, 126, 189, 252]  # 3, 6, 9, and 12 months (approx.)
+    periods = [63, 126, 189, 252]
     weights = [2, 1, 1, 1]
     rs_values = []
 
@@ -60,21 +62,25 @@ def calculate_rs_score(ticker_data, benchmark_data):
                        (benchmark_data['close'].iloc[-1] / benchmark_data['close'].iloc[-period])
             rs_values.append(rs_value)
         else:
-            rs_values.append(0.0)  # Default to 0 if there's not enough data
+            rs_values.append(0.0)
 
-    # Calculate raw RS score
     rs_raw = sum([rs_values[i] * weights[i] for i in range(4)])
-
-    # Calculate max and min scores for normalization
     max_score = sum(weights)
     min_score = -max_score
+    return normalize_rs_score(rs_raw, max_score, min_score)
 
-    # Normalize RS score to a range between 1-99
-    rs_score = ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
-    rs_score = min(99, max(1, rs_score))  # Ensure score stays within 1-99
-    return rs_score
+# Function to detect new RS highs
+def check_new_rs_high(ticker, rs_value):
+    # Look back over 40 days to calculate RS new high
+    lookback_days = 40
+    previous_rs_data = list(indicators_collection.find({"ticker": ticker}).sort("date", -1).limit(lookback_days))
 
-# Function to calculate and store RS scores and new RS high status
+    # If no previous data is available or if RS value exceeds previous highs
+    if not previous_rs_data or rs_value > max([data.get("rs_score", -np.inf) for data in previous_rs_data]):
+        return True
+    return False
+
+# Function to calculate and store RS scores and detect RS new highs
 def calculate_and_store_relative_strength():
     # Load benchmark data from MongoDB
     benchmark_data = list(ohlcv_collection.find({"ticker": benchmark_ticker}).sort("date", 1))
@@ -90,12 +96,7 @@ def calculate_and_store_relative_strength():
             rs_score = calculate_rs_score(ticker_df, benchmark_df)
 
             # Detect new RS highs
-            previous_rs_high = indicators_collection.find_one({"ticker": ticker}, {"rs_score": 1})
-            if previous_rs_high:
-                previous_score = previous_rs_high.get("rs_score", 0)
-                new_rs_high = bool(rs_score > previous_score)
-            else:
-                new_rs_high = False
+            new_rs_high = check_new_rs_high(ticker, rs_score)
 
             # Store RS score and new RS high status
             indicator_data = {
@@ -110,7 +111,7 @@ def calculate_and_store_relative_strength():
                 {"$set": indicator_data},
                 upsert=True
             )
-            print(f"Stored RS score for {ticker}: {rs_score}")
+            print(f"Stored RS score for {ticker}: {rs_score}, New RS High: {new_rs_high}")
         else:
             print(f"No data found for ticker: {ticker}")
 
