@@ -8,9 +8,6 @@ client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 
-# Define test tickers
-test_tickers = ['HOOD', 'DVA', 'TSLA', 'BABA', 'FFIN', 'RARE', 'META', 'ELF', 'ICE', 'ADC']
-
 # Market index symbol (using ^GSPC instead of SPY)
 market_ticker = '^GSPC'
 
@@ -98,8 +95,12 @@ def weinstein_stage_analysis(ticker_df, market_df):
 
     return ticker_df
 
-# Main function to process test tickers
+# Main function to process all tickers
 def main():
+    # Fetch all tickers from the database
+    all_tickers = ohlcv_collection.distinct('ticker')
+    print(f"Total tickers to process: {len(all_tickers)}")
+
     # Fetch market data
     market_daily_df = fetch_daily_data(market_ticker)
     if market_daily_df is None:
@@ -109,8 +110,8 @@ def main():
     market_weekly_df = resample_to_weekly(market_daily_df)
     market_weekly_df.rename(columns={'Close': 'Close_market'}, inplace=True)
 
-    # Process each test ticker
-    for ticker in test_tickers:
+    # Process each ticker
+    for ticker in all_tickers:
         print(f"Processing {ticker}")
         ticker_daily_df = fetch_daily_data(ticker)
         if ticker_daily_df is None:
@@ -139,10 +140,56 @@ def main():
         latest_data = combined_df.iloc[-1]
         if latest_data['buy_signal']:
             print(f"Buy signal detected for {ticker} on {latest_data.name.date()}")
+            # Optionally store the signal in the database
+            # Store signal in indicators collection
+            indicator_data = {
+                "ticker": ticker,
+                "buy_signal": True,
+                "signal_date": latest_data.name.to_pydatetime(),
+                "stage": int(latest_data['current_stage']),
+                "mansfield_rs": float(latest_data['mansfield_rs']),
+                "date": pd.to_datetime('today'),
+            }
+            # Convert numpy types to native types
+            indicator_data = convert_numpy_types(indicator_data)
+            db.indicators.update_one(
+                {"ticker": ticker},
+                {"$set": indicator_data},
+                upsert=True
+            )
         else:
             print(f"No buy signal for {ticker}")
+            # Optionally update the indicator data without buy signal
+            indicator_data = {
+                "ticker": ticker,
+                "buy_signal": False,
+                "signal_date": latest_data.name.to_pydatetime(),
+                "stage": int(latest_data['current_stage']),
+                "mansfield_rs": float(latest_data['mansfield_rs']),
+                "date": pd.to_datetime('today'),
+            }
+            # Convert numpy types to native types
+            indicator_data = convert_numpy_types(indicator_data)
+            db.indicators.update_one(
+                {"ticker": ticker},
+                {"$set": indicator_data},
+                upsert=True
+            )
 
-        # Optionally, you can print more details or save the results
+# Function to convert numpy data types to native Python types
+def convert_numpy_types(data):
+    if isinstance(data, dict):
+        return {k: convert_numpy_types(v) for k, v in data.items()}
+    elif isinstance(data, np.bool_):
+        return bool(data)
+    elif isinstance(data, np.integer):
+        return int(data)
+    elif isinstance(data, np.floating):
+        return float(data)
+    elif isinstance(data, np.ndarray):
+        return data.tolist()
+    else:
+        return data
 
 if __name__ == "__main__":
     main()
