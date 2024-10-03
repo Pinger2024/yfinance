@@ -92,6 +92,74 @@ def check_new_rs_high(merged_df, lookback=40):
             return True
     return False
 
+# Function to calculate Minervini criteria
+def calculate_minervini_criteria(ticker_df):
+    # Ensure 'close', 'high', and 'low' columns are floats
+    ticker_df['close'] = ticker_df['close'].astype(float)
+    ticker_df['high'] = ticker_df['high'].astype(float)
+    ticker_df['low'] = ticker_df['low'].astype(float)
+
+    # Calculate moving averages
+    ticker_df['sma50'] = ticker_df['close'].rolling(window=50).mean()
+    ticker_df['sma150'] = ticker_df['close'].rolling(window=150).mean()
+    ticker_df['sma200'] = ticker_df['close'].rolling(window=200).mean()
+    ticker_df['sma200_22'] = ticker_df['sma200'].shift(22)  # SMA 200 from 22 days ago
+
+    # Get the latest values
+    latest_data = ticker_df.iloc[-1]
+
+    # Minervini criteria calculations
+    is_price_above_sma_150_and_200 = (latest_data['close'] > latest_data['sma150']) and (latest_data['close'] > latest_data['sma200'])
+    is_sma_150_above_sma_200 = latest_data['sma150'] > latest_data['sma200']
+    is_sma200_trending_up = latest_data['sma200'] > latest_data['sma200_22']
+    is_sma50_above_sma150_and_sma200 = (latest_data['sma50'] > latest_data['sma150']) and (latest_data['sma50'] > latest_data['sma200'])
+    is_price_above_sma50 = latest_data['close'] > latest_data['sma50']
+
+    # 52-week high and low
+    high_lookback = 260  # Approximately 52 weeks
+    low_lookback = 260
+
+    if len(ticker_df) >= high_lookback:
+        highest_price = ticker_df['high'].rolling(window=high_lookback).max().iloc[-1]
+        lowest_price = ticker_df['low'].rolling(window=low_lookback).min().iloc[-1]
+    else:
+        highest_price = ticker_df['high'].rolling(window=len(ticker_df)).max().iloc[-1]
+        lowest_price = ticker_df['low'].rolling(window=len(ticker_df)).min().iloc[-1]
+
+    is_price_25_percent_above_52_week_low = ((latest_data['close'] / lowest_price) - 1) * 100 >= 25
+    is_price_within_25_percent_of_52_week_high = (1 - (latest_data['close'] / highest_price)) * 100 <= 25
+
+    # Compile criteria
+    minervini_criteria = {
+        'is_price_above_sma_150_and_200': is_price_above_sma_150_and_200,
+        'is_sma_150_above_sma_200': is_sma_150_above_sma_200,
+        'is_sma200_trending_up': is_sma200_trending_up,
+        'is_sma50_above_sma150_and_sma200': is_sma50_above_sma150_and_sma200,
+        'is_price_above_sma50': is_price_above_sma50,
+        'is_price_25_percent_above_52_week_low': is_price_25_percent_above_52_week_low,
+        'is_price_within_25_percent_of_52_week_high': is_price_within_25_percent_of_52_week_high,
+        'highest_price_52_week': highest_price,
+        'lowest_price_52_week': lowest_price,
+        'sma50': latest_data['sma50'],
+        'sma150': latest_data['sma150'],
+        'sma200': latest_data['sma200'],
+    }
+
+    # Count how many criteria are met
+    criteria_flags = [
+        is_price_above_sma_150_and_200,
+        is_sma_150_above_sma_200,
+        is_sma200_trending_up,
+        is_sma50_above_sma150_and_sma200,
+        is_price_above_sma50,
+        is_price_25_percent_above_52_week_low,
+        is_price_within_25_percent_of_52_week_high,
+    ]
+    minervini_criteria['minervini_score'] = sum(criteria_flags)
+    minervini_criteria['meets_minervini_criteria'] = all(criteria_flags)
+
+    return minervini_criteria
+
 # Function to calculate and store RS scores and detect RS new highs
 def calculate_and_store_relative_strength():
     # Load benchmark data from MongoDB
@@ -118,12 +186,16 @@ def calculate_and_store_relative_strength():
                 # Detect new RS highs
                 new_rs_high = check_new_rs_high(merged_df)
 
-                # Store RS score and new RS high status
+                # Calculate Minervini criteria
+                minervini_criteria = calculate_minervini_criteria(ticker_df)
+
+                # Store RS score, new RS high status, Minervini criteria, and moving averages
                 indicator_data = {
                     "ticker": ticker,
                     "rs_score": min(max(rs_score, 1), 99),  # Ensure RS score is between 1 and 99
                     "new_rs_high": new_rs_high,
-                    "date": pd.to_datetime('today')
+                    "date": pd.to_datetime('today'),
+                    "minervini_criteria": minervini_criteria,
                 }
 
                 indicators_collection.update_one(
@@ -131,7 +203,7 @@ def calculate_and_store_relative_strength():
                     {"$set": indicator_data},
                     upsert=True
                 )
-                print(f"Stored RS score for {ticker}: {rs_score}, New RS High: {new_rs_high}")
+                print(f"Stored data for {ticker}: RS Score={rs_score}, New RS High={new_rs_high}, Minervini Score={minervini_criteria['minervini_score']}")
             else:
                 print(f"No merged data available for ticker: {ticker}")
         else:
