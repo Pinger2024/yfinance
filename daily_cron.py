@@ -23,28 +23,30 @@ def fetch_daily_ohlcv_data():
         stock = yf.Ticker(ticker)
         today_data = stock.history(period="1d")
 
-        if not today_data.empty:
-            date = today_data.index[0].to_pydatetime()
-            row = today_data.iloc[0]
-            data = {
-                "ticker": ticker,
-                "date": date,
-                "open": row['Open'],
-                "high": row['High'],
-                "low": row['Low'],
-                "close": row['Close'],
-                "volume": row['Volume']
-            }
-
-            # Store today's data in the collection
-            ohlcv_collection.update_one(
-                {"ticker": ticker, "date": date},
-                {"$set": data},
-                upsert=True
-            )
-            print(f"Stored data for {ticker} on {date}")
-        else:
+        # Check if any data is returned
+        if today_data.empty:
             print(f"No data found for {ticker} on {datetime.now()}")
+            continue
+
+        date = today_data.index[0].to_pydatetime()
+        row = today_data.iloc[0]
+        data = {
+            "ticker": ticker,
+            "date": date,
+            "open": row['Open'],
+            "high": row['High'],
+            "low": row['Low'],
+            "close": row['Close'],
+            "volume": row['Volume']
+        }
+
+        # Store today's data in the collection
+        ohlcv_collection.update_one(
+            {"ticker": ticker, "date": date},
+            {"$set": data},
+            upsert=True
+        )
+        print(f"Stored data for {ticker} on {date}")
 
 # Function to calculate and store relative strength (RS) scores
 def calculate_and_store_relative_strength():
