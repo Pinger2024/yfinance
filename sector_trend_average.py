@@ -1,0 +1,42 @@
+import pandas as pd
+from pymongo import MongoClient
+from datetime import datetime
+
+# MongoDB connection (hardcoded)
+client = MongoClient("mongodb://mongodb-9iyq:27017")
+db = client['StockData']
+ohlcv_collection = db['ohlcv_data']
+sector_trends_collection = db['sector_trends']
+
+# Fetch distinct dates from the ohlcv_data collection
+dates = ohlcv_collection.distinct('date')
+
+# Function to calculate and store average RS score per sector for each date
+def calculate_average_rs_by_sector():
+    for date in dates:
+        print(f"Processing for date: {date}")
+        
+        # Fetch all tickers' RS scores and sectors for the given date
+        pipeline = [
+            {"$match": {"date": date}}, 
+            {"$group": {"_id": "$sector", "avg_rs_score": {"$avg": "$rs_score"}}}
+        ]
+        
+        sector_rs_scores = list(ohlcv_collection.aggregate(pipeline))
+        
+        # Store the results in the sector_trends collection
+        for sector_data in sector_rs_scores:
+            sector_trends_collection.update_one(
+                {"sector": sector_data["_id"], "date": date},
+                {"$set": {
+                    "sector": sector_data["_id"],
+                    "date": date,
+                    "avg_rs_score": sector_data["avg_rs_score"]
+                }},
+                upsert=True
+            )
+        print(f"Stored average RS score for sectors on {date}")
+
+# Run the function to calculate and store the sector trends
+if __name__ == "__main__":
+    calculate_average_rs_by_sector()
