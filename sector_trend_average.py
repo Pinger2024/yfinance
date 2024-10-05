@@ -13,6 +13,7 @@ dates = ohlcv_collection.distinct('date')
 
 # Function to calculate and store average RS score per sector for each date
 def calculate_average_rs_by_sector():
+    print(f"Starting calculation for {len(dates)} dates...")
     for date in dates:
         print(f"Processing for date: {date}")
         
@@ -24,8 +25,15 @@ def calculate_average_rs_by_sector():
         
         sector_rs_scores = list(ohlcv_collection.aggregate(pipeline))
         
+        if len(sector_rs_scores) == 0:
+            print(f"No data found for {date}, skipping.")
+            continue
+        
+        print(f"Found {len(sector_rs_scores)} sectors for date: {date}")
+        
         # Store the results in the sector_trends collection
         for sector_data in sector_rs_scores:
+            print(f"Storing data for sector: {sector_data['_id']}, RS score: {sector_data['avg_rs_score']}")
             sector_trends_collection.update_one(
                 {"sector": sector_data["_id"], "date": date},
                 {"$set": {
@@ -35,8 +43,10 @@ def calculate_average_rs_by_sector():
                 }},
                 upsert=True
             )
-        print(f"Stored average RS score for sectors on {date}")
+        print(f"Finished processing for {date}")
 
 # Run the function to calculate and store the sector trends
 if __name__ == "__main__":
+    print("Starting the sector trend calculation script.")
     calculate_average_rs_by_sector()
+    print("Finished calculating and storing sector trends.")
