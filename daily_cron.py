@@ -26,6 +26,11 @@ def fetch_daily_ohlcv_data():
         if not today_data.empty:
             date = today_data.index[-1].to_pydatetime()  # Get the latest available date
             row = today_data.iloc[-1]
+
+            # Fetch sector information
+            stock_info = stock.info
+            sector = stock_info.get('sector', 'Unknown')
+
             data = {
                 "ticker": ticker,
                 "date": date,
@@ -33,10 +38,11 @@ def fetch_daily_ohlcv_data():
                 "high": row['High'],
                 "low": row['Low'],
                 "close": row['Close'],
-                "volume": row['Volume']
+                "volume": row['Volume'],
+                "sector": sector  # Store sector information
             }
 
-            # Store today's data in the collection
+            # Store today's data in the OHLCV collection
             ohlcv_collection.update_one(
                 {"ticker": ticker, "date": date},
                 {"$set": data},
@@ -230,6 +236,14 @@ def calculate_and_store_relative_strength():
                     {"$set": indicator_data},
                     upsert=True
                 )
+                
+                # Update RS score in OHLCV collection for historical tracking
+                ohlcv_collection.update_one(
+                    {"ticker": ticker, "date": merged_df['date'].iloc[-1]},
+                    {"$set": {"rs_score": rs_score}},
+                    upsert=True
+                )
+                
                 print(f"Stored data for {ticker}: RS Score={rs_score}, New RS High={new_rs_high}, Minervini Score={minervini_criteria['minervini_score']}")
             else:
                 print(f"No merged data available for ticker: {ticker}")
