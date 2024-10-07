@@ -42,6 +42,9 @@ def calculate_sector_trends():
         ]
         sector_data = list(ohlcv_collection.aggregate(pipeline))
 
+        # Debugging: Log the sector data
+        logging.info(f"Sector data for {date}: {sector_data}")
+
         # Aggregate industry data
         industry_pipeline = [
             {"$match": {"date": date, "industry": {"$exists": True, "$ne": None}}},
@@ -52,6 +55,9 @@ def calculate_sector_trends():
             }}
         ]
         industry_data = list(ohlcv_collection.aggregate(industry_pipeline))
+
+        # Debugging: Log the industry data
+        logging.info(f"Industry data for {date}: {industry_data}")
 
         # Store the results in sector_trends collection
         for sector in sector_data:
