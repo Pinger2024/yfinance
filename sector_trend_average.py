@@ -2,6 +2,7 @@ import pymongo
 import logging
 from pymongo import MongoClient
 import os
+from datetime import datetime
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -19,17 +20,26 @@ except Exception as e:
     logging.error(f"Error connecting to MongoDB: {e}")
     client = None
 
+# Define the start date (You can change this as needed)
+start_date = datetime.strptime("2023-04-15", "%Y-%m-%d")
+
 # Function to calculate sector and industry trends
 def calculate_sector_trends():
     if client is None:
         logging.error("MongoDB client is not connected.")
         return
 
-    # Get distinct dates from ohlcv_data for RS scores
-    distinct_dates = ohlcv_collection.distinct('date')
+    # Get distinct dates from ohlcv_data for RS scores that are greater than or equal to the start date
+    distinct_dates = ohlcv_collection.distinct('date', {'date': {'$gte': start_date}})
 
     for date in distinct_dates:
         logging.info(f"Processing for date: {date}")
+
+        # Check if sector trends already exist for this date, to avoid redundant processing
+        existing_trend = sector_trends_collection.find_one({"date": date})
+        if existing_trend:
+            logging.info(f"Skipping date {date} as it has already been processed.")
+            continue
 
         # Group tickers by sector from the indicators collection
         sector_pipeline = [
