@@ -1,58 +1,92 @@
-import yfinance as yf
+import pymongo
+import logging
 from pymongo import MongoClient
-import pandas as pd
-import numpy as np
+import os
 from datetime import datetime
 
-# MongoDB connection (hardcoded)
-client = MongoClient("mongodb://mongodb-9iyq:27017")
-db = client['StockData']
-ohlcv_collection = db['ohlcv_data']
-sector_trends_collection = db['sector_trends']
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
-# Fetch distinct dates to process
-dates = ohlcv_collection.distinct("date")
+# MongoDB connection setup
+try:
+    mongo_uri = os.environ.get('MONGO_URI', 'mongodb://mongodb-9iyq:27017')
+    client = MongoClient(mongo_uri)
+    db = client['StockData']
+    ohlcv_collection = db['ohlcv_data']
+    sector_trends_collection = db['sector_trends']
+    logging.info("Successfully connected to MongoDB.")
+except Exception as e:
+    logging.error(f"Error connecting to MongoDB: {e}")
+    client = None
 
-# Process each date to calculate average RS score for each sector
+# Function to calculate sector and industry trends
 def calculate_sector_trends():
-    print("Starting sector trend calculation script.")
+    if client is None:
+        logging.error("MongoDB client is not connected.")
+        return
     
-    for date in dates:
-        print(f"Processing for date: {date}")
-        # Fetch data for that date, excluding sectors marked as "Unknown"
-        date_data = list(ohlcv_collection.find({"date": date, "sector": {"$ne": "Unknown"}}))
+    # Get distinct dates
+    distinct_dates = ohlcv_collection.distinct('date')
+    
+    for date in distinct_dates:
+        logging.info(f"Processing for date: {date}")
 
-        # Create a DataFrame
-        df = pd.DataFrame(date_data)
+        # Aggregate sector data
+        pipeline = [
+            {"$match": {"date": date, "sector": {"$exists": True, "$ne": None}}},
+            {"$group": {
+                "_id": "$sector",
+                "average_rs": {"$avg": "$rs_score"},
+                "tickers_in_sector": {"$addToSet": "$ticker"}
+            }}
+        ]
+        sector_data = list(ohlcv_collection.aggregate(pipeline))
 
-        if not df.empty:
-            # Group by sector and calculate average RS score
-            sector_trends = df.groupby("sector").agg({"rs_score": "mean"}).reset_index()
+        # Aggregate industry data
+        industry_pipeline = [
+            {"$match": {"date": date, "industry": {"$exists": True, "$ne": None}}},
+            {"$group": {
+                "_id": "$industry",
+                "average_rs": {"$avg": "$rs_score"},
+                "tickers_in_industry": {"$addToSet": "$ticker"}
+            }}
+        ]
+        industry_data = list(ohlcv_collection.aggregate(industry_pipeline))
 
-            print(f"Found {len(sector_trends)} sectors for date: {date}")
+        # Store the results in sector_trends collection
+        for sector in sector_data:
+            sector_trend = {
+                "date": date,
+                "sector": sector["_id"],
+                "average_rs": sector["average_rs"],
+                "tickers_in_sector": sector["tickers_in_sector"],
+                "type": "sector"
+            }
+            sector_trends_collection.update_one(
+                {"date": date, "sector": sector["_id"], "type": "sector"},
+                {"$set": sector_trend},
+                upsert=True
+            )
+            logging.info(f"Stored sector data for {sector['_id']} on {date}")
 
-            for _, row in sector_trends.iterrows():
-                sector = row['sector']
-                rs_score = row['rs_score']
+        for industry in industry_data:
+            industry_trend = {
+                "date": date,
+                "industry": industry["_id"],
+                "average_rs": industry["average_rs"],
+                "tickers_in_industry": industry["tickers_in_industry"],
+                "type": "industry"
+            }
+            sector_trends_collection.update_one(
+                {"date": date, "industry": industry["_id"], "type": "industry"},
+                {"$set": industry_trend},
+                upsert=True
+            )
+            logging.info(f"Stored industry data for {industry['_id']} on {date}")
 
-                # Store the sector trend data for that date
-                sector_data = {
-                    "sector": sector,
-                    "date": date,
-                    "avg_rs_score": rs_score
-                }
-
-                sector_trends_collection.update_one(
-                    {"sector": sector, "date": date},
-                    {"$set": sector_data},
-                    upsert=True
-                )
-                print(f"Storing data for sector: {sector}, RS score: {rs_score}")
-        else:
-            print(f"No valid data for date: {date} or all sectors are 'Unknown'.")
-
-        print(f"Finished processing for {date}. Took {datetime.now()}.")
+    logging.info("Completed processing for all dates.")
 
 if __name__ == "__main__":
-    print("Running 'sector_trend_average.py'")
+    logging.info("Starting sector and industry trend calculation script.")
     calculate_sector_trends()
+    logging.info("Sector and industry trend calculation completed.")
