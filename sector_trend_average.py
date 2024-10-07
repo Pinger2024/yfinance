@@ -13,6 +13,7 @@ try:
     client = MongoClient(mongo_uri)
     db = client['StockData']
     ohlcv_collection = db['ohlcv_data']
+    indicators_collection = db['indicators']
     sector_trends_collection = db['sector_trends']
     logging.info("Successfully connected to MongoDB.")
 except Exception as e:
@@ -31,7 +32,7 @@ def calculate_sector_trends():
     for date in distinct_dates:
         logging.info(f"Processing for date: {date}")
 
-        # Aggregate sector data
+        # Aggregate sector data from indicators collection
         pipeline = [
             {"$match": {"date": date, "sector": {"$exists": True, "$ne": None}}},
             {"$group": {
@@ -40,12 +41,12 @@ def calculate_sector_trends():
                 "tickers_in_sector": {"$addToSet": "$ticker"}
             }}
         ]
-        sector_data = list(ohlcv_collection.aggregate(pipeline))
+        sector_data = list(indicators_collection.aggregate(pipeline))
 
         # Debugging: Log the sector data
         logging.info(f"Sector data for {date}: {sector_data}")
 
-        # Aggregate industry data
+        # Aggregate industry data from indicators collection
         industry_pipeline = [
             {"$match": {"date": date, "industry": {"$exists": True, "$ne": None}}},
             {"$group": {
@@ -54,7 +55,7 @@ def calculate_sector_trends():
                 "tickers_in_industry": {"$addToSet": "$ticker"}
             }}
         ]
-        industry_data = list(ohlcv_collection.aggregate(industry_pipeline))
+        industry_data = list(indicators_collection.aggregate(industry_pipeline))
 
         # Debugging: Log the industry data
         logging.info(f"Industry data for {date}: {industry_data}")
