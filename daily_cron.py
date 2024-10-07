@@ -13,6 +13,7 @@ client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
+sector_trends_collection = db['sector_trends']
 
 # List of tickers to process
 tickers = ohlcv_collection.distinct('ticker')
@@ -124,11 +125,77 @@ def calculate_and_store_rs_scores():
 
                 logging.info(f"Stored RS score for {ticker}: {rs_score}")
 
+# Calculate sector and industry trends
+def calculate_sector_and_industry_trends():
+    # Get today's date
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    # Aggregate sector data
+    pipeline_sector = [
+        {"$match": {"date": today, "sector": {"$exists": True, "$ne": None}}},
+        {"$group": {
+            "_id": "$sector",
+            "average_rs": {"$avg": "$rs_score"},
+            "tickers_in_sector": {"$addToSet": "$ticker"}
+        }}
+    ]
+    sector_data = list(ohlcv_collection.aggregate(pipeline_sector))
+
+    # Aggregate industry data
+    pipeline_industry = [
+        {"$match": {"date": today, "industry": {"$exists": True, "$ne": None}}},
+        {"$group": {
+            "_id": "$industry",
+            "average_rs": {"$avg": "$rs_score"},
+            "tickers_in_industry": {"$addToSet": "$ticker"}
+        }}
+    ]
+    industry_data = list(ohlcv_collection.aggregate(pipeline_industry))
+
+    # Insert or update sector and industry data in sector_trends_collection
+    for sector in sector_data:
+        sector_trend = {
+            "date": today,
+            "sector": sector["_id"],
+            "average_rs": sector["average_rs"],
+            "tickers_in_sector": sector["tickers_in_sector"],
+            "type": "sector"
+        }
+        sector_trends_collection.update_one(
+            {"date": today, "sector": sector["_id"], "type": "sector"},
+            {"$set": sector_trend},
+            upsert=True
+        )
+        logging.info(f"Stored sector data for {sector['_id']} on {today}")
+
+    for industry in industry_data:
+        industry_trend = {
+            "date": today,
+            "industry": industry["_id"],
+            "average_rs": industry["average_rs"],
+            "tickers_in_industry": industry["tickers_in_industry"],
+            "type": "industry"
+        }
+        sector_trends_collection.update_one(
+            {"date": today, "industry": industry["_id"], "type": "industry"},
+            {"$set": industry_trend},
+            upsert=True
+        )
+        logging.info(f"Stored industry data for {industry['_id']} on {today}")
+
 # Run the daily cron job
 def run_daily_cron_job():
     logging.info("Starting daily cron job...")
+    
+    # Step 1: Fetch today's OHLCV data for all tickers
     fetch_daily_ohlcv_data()
+    
+    # Step 2: Calculate RS scores for all tickers
     calculate_and_store_rs_scores()
+
+    # Step 3: Calculate sector and industry trends
+    calculate_sector_and_industry_trends()
+    
     logging.info("Daily cron job completed.")
 
 if __name__ == "__main__":
