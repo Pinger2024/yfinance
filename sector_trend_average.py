@@ -62,12 +62,16 @@ def calculate_sector_trends():
                 "tickers_in_sector": sector["tickers_in_sector"],
                 "type": "sector"
             }
-            sector_trends_collection.update_one(
-                {"date": date, "sector": sector["_id"], "type": "sector"},
-                {"$set": sector_trend},
-                upsert=True
-            )
-            logging.info(f"Stored sector data for {sector['_id']} on {date}")
+            try:
+                logging.info(f"Attempting to insert/update sector data for {sector['_id']} on {date}")
+                sector_trends_collection.update_one(
+                    {"date": date, "sector": sector["_id"], "type": "sector"},
+                    {"$set": sector_trend},
+                    upsert=True
+                )
+                logging.info(f"Stored sector data for {sector['_id']} on {date}")
+            except Exception as e:
+                logging.error(f"Error inserting sector data for {sector['_id']} on {date}: {e}")
 
         for industry in industry_data:
             industry_trend = {
@@ -77,12 +81,18 @@ def calculate_sector_trends():
                 "tickers_in_industry": industry["tickers_in_industry"],
                 "type": "industry"
             }
-            sector_trends_collection.update_one(
-                {"date": date, "industry": industry["_id"], "type": "industry"},
-                {"$set": industry_trend},
-                upsert=True
-            )
-            logging.info(f"Stored industry data for {industry['_id']} on {date}")
+            try:
+                logging.info(f"Attempting to insert/update industry data for {industry['_id']} on {date}")
+                sector_trends_collection.update_one(
+                    {"date": date, "industry": industry["_id"], "type": "industry"},
+                    {"$set": industry_trend},
+                    upsert=True
+                )
+                logging.info(f"Stored industry data for {industry['_id']} on {date}")
+            except Exception as e:
+                logging.error(f"Error inserting industry data for {industry['_id']} on {date}: {e}")
+
+        logging.info(f"Finished processing for {date}.")
 
     logging.info("Completed processing for all dates.")
 
