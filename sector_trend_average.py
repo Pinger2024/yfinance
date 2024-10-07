@@ -2,7 +2,6 @@ import pymongo
 import logging
 from pymongo import MongoClient
 import os
-from datetime import datetime
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -25,81 +24,86 @@ def calculate_sector_trends():
     if client is None:
         logging.error("MongoDB client is not connected.")
         return
-    
-    # Get distinct dates
+
+    # Get distinct dates from ohlcv_data for RS scores
     distinct_dates = ohlcv_collection.distinct('date')
-    
+
     for date in distinct_dates:
         logging.info(f"Processing for date: {date}")
 
-        # Aggregate sector data from indicators collection
-        pipeline = [
-            {"$match": {"date": date, "sector": {"$exists": True, "$ne": None}}},
+        # Group tickers by sector from the indicators collection
+        sector_pipeline = [
+            {"$match": {"sector": {"$exists": True, "$ne": None}}},
             {"$group": {
                 "_id": "$sector",
-                "average_rs": {"$avg": "$rs_score"},
                 "tickers_in_sector": {"$addToSet": "$ticker"}
             }}
         ]
-        sector_data = list(indicators_collection.aggregate(pipeline))
+        sector_data = list(indicators_collection.aggregate(sector_pipeline))
 
-        # Debugging: Log the sector data
-        logging.info(f"Sector data for {date}: {sector_data}")
-
-        # Aggregate industry data from indicators collection
+        # Group tickers by industry from the indicators collection
         industry_pipeline = [
-            {"$match": {"date": date, "industry": {"$exists": True, "$ne": None}}},
+            {"$match": {"industry": {"$exists": True, "$ne": None}}},
             {"$group": {
                 "_id": "$industry",
-                "average_rs": {"$avg": "$rs_score"},
                 "tickers_in_industry": {"$addToSet": "$ticker"}
             }}
         ]
         industry_data = list(indicators_collection.aggregate(industry_pipeline))
 
-        # Debugging: Log the industry data
-        logging.info(f"Industry data for {date}: {industry_data}")
-
-        # Store the results in sector_trends collection
+        # Process sectors
         for sector in sector_data:
-            sector_trend = {
-                "date": date,
-                "sector": sector["_id"],
-                "average_rs": sector["average_rs"],
-                "tickers_in_sector": sector["tickers_in_sector"],
-                "type": "sector"
-            }
-            try:
-                logging.info(f"Attempting to insert/update sector data for {sector['_id']} on {date}")
+            tickers_in_sector = sector["tickers_in_sector"]
+            rs_scores = []
+            for ticker in tickers_in_sector:
+                # Get the RS score from ohlcv_data for the current date
+                rs_score_data = ohlcv_collection.find_one({"ticker": ticker, "date": date}, {"rs_score": 1})
+                if rs_score_data and "rs_score" in rs_score_data:
+                    rs_scores.append(rs_score_data["rs_score"])
+
+            # Calculate the average RS score for the sector
+            if rs_scores:
+                average_rs = sum(rs_scores) / len(rs_scores)
+                sector_trend = {
+                    "date": date,
+                    "sector": sector["_id"],
+                    "average_rs": average_rs,
+                    "tickers_in_sector": tickers_in_sector,
+                    "type": "sector"
+                }
                 sector_trends_collection.update_one(
                     {"date": date, "sector": sector["_id"], "type": "sector"},
                     {"$set": sector_trend},
                     upsert=True
                 )
                 logging.info(f"Stored sector data for {sector['_id']} on {date}")
-            except Exception as e:
-                logging.error(f"Error inserting sector data for {sector['_id']} on {date}: {e}")
 
+        # Process industries
         for industry in industry_data:
-            industry_trend = {
-                "date": date,
-                "industry": industry["_id"],
-                "average_rs": industry["average_rs"],
-                "tickers_in_industry": industry["tickers_in_industry"],
-                "type": "industry"
-            }
-            try:
-                logging.info(f"Attempting to insert/update industry data for {industry['_id']} on {date}")
+            tickers_in_industry = industry["tickers_in_industry"]
+            rs_scores = []
+            for ticker in tickers_in_industry:
+                # Get the RS score from ohlcv_data for the current date
+                rs_score_data = ohlcv_collection.find_one({"ticker": ticker, "date": date}, {"rs_score": 1})
+                if rs_score_data and "rs_score" in rs_score_data:
+                    rs_scores.append(rs_score_data["rs_score"])
+
+            # Calculate the average RS score for the industry
+            if rs_scores:
+                average_rs = sum(rs_scores) / len(rs_scores)
+                industry_trend = {
+                    "date": date,
+                    "industry": industry["_id"],
+                    "average_rs": average_rs,
+                    "tickers_in_industry": tickers_in_industry,
+                    "type": "industry"
+                }
                 sector_trends_collection.update_one(
                     {"date": date, "industry": industry["_id"], "type": "industry"},
                     {"$set": industry_trend},
                     upsert=True
                 )
                 logging.info(f"Stored industry data for {industry['_id']} on {date}")
-            except Exception as e:
-                logging.error(f"Error inserting industry data for {industry['_id']} on {date}: {e}")
-
-        logging.info(f"Finished processing for {date}.")
 
     logging.info("Completed processing for all dates.")
 
