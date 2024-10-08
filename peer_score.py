@@ -204,4 +204,7 @@ if __name__ == "__main__":
     try:
         start_time = time.time()
         calculate_and_store_sector_peer_rs_scores()
-        end_time = time
+        end_time = time.time()
+        logger.info(f"Total execution time: {end_time - start_time:.2f} seconds")
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred: {e}")
