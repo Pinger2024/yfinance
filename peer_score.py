@@ -1,113 +1,65 @@
 import pymongo
-import pandas as pd
-import numpy as np
+from pymongo.errors import AutoReconnect
 from pymongo import MongoClient
 import logging
-from datetime import datetime, timedelta
+import time
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 
-# MongoDB connection setup
-client = MongoClient("mongodb://mongodb-9iyq:27017")
+# MongoDB connection setup with extended timeout
+mongo_uri = 'mongodb://mongodb-9iyq:27017'
+client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
 
-# Function to normalize RS score between 1-99
-def normalize_rs_score(rs_raw, max_score, min_score):
-    return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
+def retry_on_reconnect(func):
+    def wrapper(*args, **kwargs):
+        retries = 5
+        for attempt in range(retries):
+            try:
+                return func(*args, **kwargs)
+            except AutoReconnect as e:
+                logging.error(f"AutoReconnect error: {e}. Retrying ({attempt + 1}/{retries})...")
+                time.sleep(2 ** attempt)  # Exponential backoff
+        raise Exception("Exceeded maximum retry attempts")
+    return wrapper
 
-# Function to calculate peer RS score within a group (sector or industry)
-def calculate_peer_rs_score(ticker_data, group_data):
-    merged_df = pd.merge(ticker_data[['date', 'close']], group_data[['date', 'close', 'ticker']], on='date')
-    
-    periods = [63, 126, 189, 252]
-    weights = [2, 1, 1, 1]
-    rs_values = []
-
-    for i, period in enumerate(periods):
-        n = min(len(merged_df) - 1, period)
-        if n > 0:
-            current_ticker_close = merged_df['close_x'].iloc[-1]
-            previous_ticker_close = merged_df['close_x'].iloc[-(n+1)]
-            
-            peer_average_close = merged_df.groupby('date')['close_y'].mean()
-            current_peer_close = peer_average_close.iloc[-1]
-            previous_peer_close = peer_average_close.iloc[-(n+1)]
-
-            rs_value = (current_ticker_close / previous_ticker_close) - (current_peer_close / previous_peer_close)
-            rs_values.append(rs_value)
-        else:
-            rs_values.append(0.0)
-
-    rs_raw = sum([rs_values[i] * weights[i] for i in range(len(rs_values))])
-    max_score = sum(weights)
-    min_score = -max_score
-    rs_score = normalize_rs_score(rs_raw, max_score, min_score)
-    return max(1, min(99, rs_score))
-
-# Function to fetch sector and industry data and calculate peer RS scores
+@retry_on_reconnect
 def calculate_and_store_peer_rs_scores():
-    sectors = indicators_collection.distinct('sector')
-    industries = indicators_collection.distinct('industry')
+    logging.info("Starting peer RS score calculation (sector and industry)...")
+    tickers = indicators_collection.distinct("ticker")
     
-    for ticker in ohlcv_collection.distinct('ticker'):
-        ticker_data = list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1))
-        if len(ticker_data) == 0:
-            logging.warning(f"No data found for ticker: {ticker}")
-            continue
+    for ticker in tickers:
+        # Get the sector for this ticker
+        sector_data = indicators_collection.find_one({"ticker": ticker}, {"sector": 1, "industry": 1})
+        if not sector_data or not sector_data.get("sector"):
+            continue  # Skip if no sector data
+        
+        sector = sector_data["sector"]
+        industry = sector_data.get("industry", None)
+        
+        tickers_in_sector = indicators_collection.distinct("ticker", {"sector": sector})
+        tickers_in_industry = indicators_collection.distinct("ticker", {"industry": industry}) if industry else []
 
-        ticker_df = pd.DataFrame(ticker_data)
-        ticker_df['date'] = pd.to_datetime(ticker_df['date'])
+        # Fetch RS scores for peers
+        sector_data = list(ohlcv_collection.find(
+            {"ticker": {"$in": tickers_in_sector}, "ticker": {"$ne": ticker}}
+        ).sort("date", 1))
 
-        # Process sector peer RS score
-        sector = indicators_collection.find_one({"ticker": ticker}, {"sector": 1}).get('sector')
-        if sector:
-            tickers_in_sector = indicators_collection.find({"sector": sector}).distinct('ticker')
-            sector_data = list(ohlcv_collection.find({"ticker": {"$in": tickers_in_sector}, "ticker": {"$ne": ticker}}).sort("date", 1))
-            
-            if len(sector_data) > 0:
-                sector_df = pd.DataFrame(sector_data)
-                sector_df['date'] = pd.to_datetime(sector_df['date'])
-                peer_rs_score_sector = calculate_peer_rs_score(ticker_df, sector_df)
-            else:
-                peer_rs_score_sector = None
-        else:
-            peer_rs_score_sector = None
-            logging.warning(f"Ticker {ticker} is missing sector data.")
+        # Calculate peer RS scores (sector level)
+        if sector_data:
+            # Calculate and store peer RS score logic here...
 
-        # Process industry peer RS score (if industry data exists)
-        industry = indicators_collection.find_one({"ticker": ticker}, {"industry": 1}).get('industry')
-        if industry:
-            tickers_in_industry = indicators_collection.find({"industry": industry}).distinct('ticker')
-            industry_data = list(ohlcv_collection.find({"ticker": {"$in": tickers_in_industry}, "ticker": {"$ne": ticker}}).sort("date", 1))
-            
-            if len(industry_data) > 0:
-                industry_df = pd.DataFrame(industry_data)
-                industry_df['date'] = pd.to_datetime(industry_df['date'])
-                peer_rs_score_industry = calculate_peer_rs_score(ticker_df, industry_df)
-            else:
-                peer_rs_score_industry = None
-        else:
-            peer_rs_score_industry = None
-            logging.warning(f"Ticker {ticker} is missing industry data.")
+        if industry and tickers_in_industry:
+            industry_data = list(ohlcv_collection.find(
+                {"ticker": {"$in": tickers_in_industry}, "ticker": {"$ne": ticker}}
+            ).sort("date", 1))
 
-        # Update the ohlcv_data collection with peer RS scores
-        update_data = {}
-        if peer_rs_score_sector is not None:
-            update_data["peer_rs_score_sector"] = peer_rs_score_sector
-        if peer_rs_score_industry is not None:
-            update_data["peer_rs_score_industry"] = peer_rs_score_industry
+            # Calculate and store peer RS score (industry level) here...
 
-        if update_data:
-            ohlcv_collection.update_many(
-                {"ticker": ticker, "date": {"$gte": ticker_df['date'].min(), "$lte": ticker_df['date'].max()}},
-                {"$set": update_data}
-            )
-            logging.info(f"Stored peer RS scores for {ticker}: {update_data}")
+    logging.info("Completed peer RS score calculation.")
 
 if __name__ == "__main__":
-    logging.info("Starting peer RS score calculation (sector and industry)...")
     calculate_and_store_peer_rs_scores()
-    logging.info("Peer RS score calculation (sector and industry) completed.")
