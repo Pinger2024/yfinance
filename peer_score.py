@@ -1,16 +1,12 @@
 import pymongo
 import pandas as pd
-from datetime import timedelta
 from pymongo.errors import AutoReconnect
 from pymongo import MongoClient, UpdateOne
 import logging
 from logging.handlers import RotatingFileHandler
 import time
 import concurrent.futures
-from typing import List, Dict, Any
 from functools import wraps
-
-print("Script started")
 
 # Setup logging
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -22,28 +18,22 @@ logger = logging.getLogger('PeerScoreCalculator')
 logger.setLevel(logging.INFO)
 logger.addHandler(log_handler)
 
-# Also add a StreamHandler for console output
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(log_formatter)
 logger.addHandler(console_handler)
 
-print("Logging configured")
-
 # MongoDB connection setup
 mongo_uri = 'mongodb://mongodb-9iyq:27017'
-client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000, serverSelectionTimeoutMS=30000)
+client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
 
-print("MongoDB connection established")
-
 # Configuration
-BATCH_SIZE = 100
 LOOKBACK_DAYS = 252
 MAX_WORKERS = 4
 
-def retry_on_reconnect(max_retries: int = 5):
+def retry_on_reconnect(max_retries=5):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -55,16 +45,15 @@ def retry_on_reconnect(max_retries: int = 5):
                         logger.error(f"Max retries reached. Function {func.__name__} failed: {e}")
                         raise
                     logger.warning(f"AutoReconnect error: {e}. Retrying ({attempt + 1}/{max_retries})...")
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2 ** attempt)
         return wrapper
     return decorator
 
-def normalize_rs_score(rs_raw: float, max_score: float, min_score: float) -> float:
+def normalize_rs_score(rs_raw, max_score, min_score):
     return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
 
 @retry_on_reconnect()
-def get_tickers_and_sectors() -> Dict[str, str]:
-    print("Fetching tickers and sectors...")
+def get_tickers_and_sectors():
     logger.info("Fetching tickers and sectors...")
     tickers_and_sectors = {}
     for doc in indicators_collection.find({}, {'ticker': 1, 'sector': 1}):
@@ -74,48 +63,39 @@ def get_tickers_and_sectors() -> Dict[str, str]:
             tickers_and_sectors[ticker] = sector
         else:
             logger.warning(f"Skipping document due to missing ticker or sector: {doc}")
-    print(f"Found {len(tickers_and_sectors)} valid ticker-sector pairs")
-    logger.info(f"Found {len(tickers_and_sectors)} valid ticker-sector pairs")
     return tickers_and_sectors
 
 @retry_on_reconnect()
-def get_stock_data(ticker: str) -> pd.DataFrame:
-    print(f"Fetching data for {ticker}")
+def get_stock_data(ticker):
     logger.info(f"Fetching data for {ticker}")
     data = list(ohlcv_collection.find({"ticker": ticker}, {"date": 1, "close": 1}).sort("date", 1))
-    df = pd.DataFrame(data)
-    df['date'] = pd.to_datetime(df['date'])
-    return df.set_index('date')
+    if data:
+        df = pd.DataFrame(data)
+        df['date'] = pd.to_datetime(df['date'])
+        return df.set_index('date')
+    return pd.DataFrame()
 
-def process_peer_rs(ticker: str, ticker_df: pd.DataFrame, category: str, category_value: str, tickers_in_category: List[str], lookback_days: int) -> List[UpdateOne]:
-    print(f"Processing peer RS for {ticker} in {category}: {category_value}")
-    logger.info(f"Processing peer RS for {ticker} in {category}: {category_value}")
-    
-    if len(tickers_in_category) < 2:  # Need at least one peer
-        print(f"Not enough peers for {ticker} in {category}: {category_value}. Skipping.")
+def process_peer_rs(ticker, ticker_df, category, category_value, peers):
+    if len(peers) < 2:
         logger.warning(f"Not enough peers for {ticker} in {category}: {category_value}. Skipping.")
         return []
-    
-    logger.info(f"Found {len(tickers_in_category) - 1} peers for {ticker} in {category}: {category_value}")
-    
+
     peer_data = list(ohlcv_collection.find(
-        {"ticker": {"$in": tickers_in_category, "$ne": ticker}},
+        {"ticker": {"$in": peers, "$ne": ticker}},
         {"date": 1, "close": 1}
     ).sort("date", 1))
 
     if not peer_data:
-        print(f"No matching data found for {ticker} in {category}: {category_value}")
         logger.warning(f"No matching data found for {ticker} in {category}: {category_value}")
         return []
 
     peer_df = pd.DataFrame(peer_data)
     peer_df['date'] = pd.to_datetime(peer_df['date'])
-    
+
     merged_df = pd.merge(ticker_df[['close']], peer_df.groupby('date')['close'].mean().rename('peer_close'), on='date')
     merged_df = merged_df.sort_index().reset_index()
-    
-    if len(merged_df) < lookback_days:
-        print(f"Not enough data to calculate peer RS for {ticker} in {category}: {category_value}")
+
+    if len(merged_df) < LOOKBACK_DAYS:
         logger.warning(f"Not enough data to calculate peer RS for {ticker} in {category}: {category_value}")
         return []
 
@@ -123,16 +103,14 @@ def process_peer_rs(ticker: str, ticker_df: pd.DataFrame, category: str, categor
     weights = [2, 1, 1, 1]
     
     updates = []
-    for i in range(lookback_days, len(merged_df)):
+    for i in range(LOOKBACK_DAYS, len(merged_df)):
         rs_values = []
-        
         for period, weight in zip(periods, weights):
             if i - period >= 0:
                 current_ticker_close = merged_df['close'].iloc[i]
                 previous_ticker_close = merged_df['close'].iloc[i - period]
                 current_peer_close = merged_df['peer_close'].iloc[i]
                 previous_peer_close = merged_df['peer_close'].iloc[i - period]
-
                 rs_value = (current_ticker_close / previous_ticker_close) - (current_peer_close / previous_peer_close)
                 rs_values.append(rs_value * weight)
         
@@ -141,74 +119,37 @@ def process_peer_rs(ticker: str, ticker_df: pd.DataFrame, category: str, categor
         min_score = -max_score
         peer_rs_score = normalize_rs_score(rs_raw, max_score, min_score)
         peer_rs_score = max(1, min(99, peer_rs_score))
-        
+
         date = merged_df['date'].iloc[i]
         updates.append(UpdateOne(
             {"ticker": ticker, "date": date},
             {"$set": {f"peer_rs_{category}": peer_rs_score}}
         ))
-        
-        logger.info(f"Calculated peer RS for {ticker} on {date}: {peer_rs_score} ({category}: {category_value})")
-    
-    return updates
+
+    if updates:
+        ohlcv_collection.bulk_write(updates)
+        logger.info(f"Inserted {len(updates)} peer RS scores for {ticker}")
+
+def calculate_and_store_peer_rs_for_ticker(ticker, sector, peers):
+    ticker_data = get_stock_data(ticker)
+    if not ticker_data.empty:
+        process_peer_rs(ticker, ticker_data, "sector", sector, peers)
 
 @retry_on_reconnect()
 def calculate_and_store_sector_peer_rs_scores():
-    print("Starting sector peer RS score calculation...")
-    logger.info("Starting sector peer RS score calculation...")
-    
     tickers_and_sectors = get_tickers_and_sectors()
-    if not tickers_and_sectors:
-        print("No valid ticker-sector pairs found. Aborting calculation.")
-        logger.error("No valid ticker-sector pairs found. Aborting calculation.")
-        return
-
     sectors = {}
     for ticker, sector in tickers_and_sectors.items():
         sectors.setdefault(sector, []).append(ticker)
-    
-    print(f"Processing {len(tickers_and_sectors)} tickers across {len(sectors)} sectors")
-    logger.info(f"Processing {len(tickers_and_sectors)} tickers across {len(sectors)} sectors")
-    
-    all_updates = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_ticker = {}
-        for ticker, sector in tickers_and_sectors.items():
-            ticker_data = get_stock_data(ticker)
-            if not ticker_data.empty:
-                future = executor.submit(process_peer_rs, ticker, ticker_data, "sector", sector, sectors[sector], LOOKBACK_DAYS)
-                future_to_ticker[future] = ticker
 
-        for future in concurrent.futures.as_completed(future_to_ticker):
-            ticker = future_to_ticker[future]
-            try:
-                updates = future.result()
-                all_updates.extend(updates)
-                if len(all_updates) >= BATCH_SIZE:
-                    ohlcv_collection.bulk_write(all_updates)
-                    print(f"Bulk write completed for {len(all_updates)} updates")
-                    logger.info(f"Bulk write completed for {len(all_updates)} updates")
-                    all_updates = []
-            except Exception as exc:
-                print(f"{ticker} generated an exception: {exc}")
-                logger.error(f"{ticker} generated an exception: {exc}")
-    
-    if all_updates:
-        ohlcv_collection.bulk_write(all_updates)
-        print(f"Final bulk write completed for {len(all_updates)} updates")
-        logger.info(f"Final bulk write completed for {len(all_updates)} updates")
-    
-    print("Completed sector peer RS score calculation.")
-    logger.info("Completed sector peer RS score calculation.")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = []
+        for sector, tickers in sectors.items():
+            for ticker in tickers:
+                futures.append(executor.submit(calculate_and_store_peer_rs_for_ticker, ticker, sector, tickers))
+        concurrent.futures.wait(futures)
 
 if __name__ == "__main__":
-    try:
-        print("Main execution started")
-        start_time = time.time()
-        calculate_and_store_sector_peer_rs_scores()
-        end_time = time.time()
-        print(f"Main execution completed in {end_time - start_time:.2f} seconds")
-        logger.info(f"Main execution completed in {end_time - start_time:.2f} seconds")
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        logger.error(f"An error occurred: {e}")
+    start_time = time.time()
+    calculate_and_store_sector_peer_rs_scores()
+    logger.info(f"Total execution time: {time.time() - start_time:.2f} seconds")
