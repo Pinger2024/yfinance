@@ -206,5 +206,4 @@ if __name__ == "__main__":
         print(f"Total execution time: {end_time - start_time:.2f} seconds")
         logger.info(f"Total execution time: {end_time - start_time:.2f} seconds")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
-        logger.exception(f"An unexpected error occurred:
+        print(f"An unexpected error
