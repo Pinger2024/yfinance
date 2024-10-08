@@ -34,46 +34,53 @@ def retry_on_reconnect(func):
     return wrapper
 
 @retry_on_reconnect
-def calculate_and_store_peer_rs_scores(batch_size=20, lookback_days=252):
+def calculate_and_store_peer_rs_scores(batch_size=100, lookback_days=252):
     logging.info("Starting peer RS score calculation (sector and industry)...")
-    tickers = indicators_collection.distinct("ticker")
     
-    for ticker in tickers:
-        logging.info(f"Processing ticker: {ticker}")
+    tickers = indicators_collection.distinct("ticker")
+    num_batches = len(tickers) // batch_size + (len(tickers) % batch_size > 0)
+    
+    for batch_num in range(num_batches):
+        batch_tickers = tickers[batch_num * batch_size:(batch_num + 1) * batch_size]
+        logging.info(f"Processing batch {batch_num + 1}/{num_batches}")
         
-        # Get the sector and industry for this ticker
-        sector_data = indicators_collection.find_one({"ticker": ticker}, {"sector": 1, "industry": 1})
-        if not sector_data or not sector_data.get("sector"):
-            continue  # Skip if no sector data
-        
-        sector = sector_data["sector"]
-        industry = sector_data.get("industry", None)
-        
-        tickers_in_sector = indicators_collection.distinct("ticker", {"sector": sector})
-        tickers_in_industry = indicators_collection.distinct("ticker", {"industry": industry}) if industry else []
-        
-        # Fetch stock data for this ticker
-        ticker_data = list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1))
-        if not ticker_data:
-            continue
-        
-        ticker_df = pd.DataFrame(ticker_data)
-        ticker_df['date'] = pd.to_datetime(ticker_df['date'])
-        
-        # Calculate sector peer RS
-        if tickers_in_sector:
-            process_peer_rs(ticker, ticker_df, "sector", sector, lookback_days)
-        
-        # Calculate industry peer RS
-        if industry and tickers_in_industry:
-            process_peer_rs(ticker, ticker_df, "industry", industry, lookback_days)
+        for ticker in batch_tickers:
+            logging.info(f"Processing ticker: {ticker}")
+            
+            # Get the sector and industry for this ticker
+            sector_data = indicators_collection.find_one({"ticker": ticker}, {"sector": 1, "industry": 1})
+            if not sector_data or not sector_data.get("sector"):
+                continue  # Skip if no sector data
+            
+            sector = sector_data["sector"]
+            industry = sector_data.get("industry", None)
+            
+            tickers_in_sector = indicators_collection.distinct("ticker", {"sector": sector})
+            tickers_in_industry = indicators_collection.distinct("ticker", {"industry": industry}) if industry else []
+            
+            # Fetch stock data for this ticker
+            ticker_data = list(ohlcv_collection.find({"ticker": ticker}, {"date": 1, "close": 1}).sort("date", 1))
+            if not ticker_data:
+                continue
+            
+            ticker_df = pd.DataFrame(ticker_data)
+            ticker_df['date'] = pd.to_datetime(ticker_df['date'])
+            
+            # Calculate sector peer RS
+            if tickers_in_sector:
+                process_peer_rs(ticker, ticker_df, "sector", sector, lookback_days)
+            
+            # Calculate industry peer RS
+            if industry and tickers_in_industry:
+                process_peer_rs(ticker, ticker_df, "industry", industry, lookback_days)
 
     logging.info("Completed peer RS score calculation.")
 
 def process_peer_rs(ticker, ticker_df, category, category_value, lookback_days):
     # Fetch peer data from the ohlcv collection
     peer_data = list(ohlcv_collection.find(
-        {"ticker": {"$in": indicators_collection.distinct("ticker", {category: category_value}), "$ne": ticker}}
+        {"ticker": {"$in": indicators_collection.distinct("ticker", {category: category_value}), "$ne": ticker}},
+        {"date": 1, "close": 1}
     ).sort("date", 1))
 
     if not peer_data:
