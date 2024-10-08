@@ -22,7 +22,7 @@ logger.addHandler(log_handler)
 
 # MongoDB connection setup
 mongo_uri = 'mongodb://mongodb-9iyq:27017'
-client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
+client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000, serverSelectionTimeoutMS=30000)
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
@@ -54,7 +54,16 @@ def normalize_rs_score(rs_raw: float, max_score: float, min_score: float) -> flo
 @retry_on_reconnect()
 def get_tickers_and_sectors() -> Dict[str, str]:
     logger.info("Fetching tickers and sectors...")
-    return {doc['ticker']: doc['sector'] for doc in indicators_collection.find({}, {'ticker': 1, 'sector': 1})}
+    tickers_and_sectors = {}
+    for doc in indicators_collection.find({}, {'ticker': 1, 'sector': 1}):
+        ticker = doc.get('ticker')
+        sector = doc.get('sector')
+        if ticker and sector:
+            tickers_and_sectors[ticker] = sector
+        else:
+            logger.warning(f"Skipping document due to missing ticker or sector: {doc}")
+    logger.info(f"Found {len(tickers_and_sectors)} valid ticker-sector pairs")
+    return tickers_and_sectors
 
 @retry_on_reconnect()
 def get_stock_data(ticker: str) -> pd.DataFrame:
@@ -66,6 +75,10 @@ def get_stock_data(ticker: str) -> pd.DataFrame:
 
 def process_peer_rs(ticker: str, ticker_df: pd.DataFrame, category: str, category_value: str, tickers_in_category: List[str], lookback_days: int) -> List[UpdateOne]:
     logger.info(f"Processing peer RS for {ticker} in {category}: {category_value}")
+    
+    if len(tickers_in_category) < 2:  # Need at least one peer
+        logger.warning(f"Not enough peers for {ticker} in {category}: {category_value}. Skipping.")
+        return []
     
     peer_data = list(ohlcv_collection.find(
         {"ticker": {"$in": tickers_in_category, "$ne": ticker}},
@@ -122,9 +135,15 @@ def calculate_and_store_sector_peer_rs_scores():
     logger.info("Starting sector peer RS score calculation...")
     
     tickers_and_sectors = get_tickers_and_sectors()
+    if not tickers_and_sectors:
+        logger.error("No valid ticker-sector pairs found. Aborting calculation.")
+        return
+
     sectors = {}
     for ticker, sector in tickers_and_sectors.items():
         sectors.setdefault(sector, []).append(ticker)
+    
+    logger.info(f"Processing {len(tickers_and_sectors)} tickers across {len(sectors)} sectors")
     
     all_updates = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -154,7 +173,10 @@ def calculate_and_store_sector_peer_rs_scores():
     logger.info("Completed sector peer RS score calculation.")
 
 if __name__ == "__main__":
-    start_time = time.time()
-    calculate_and_store_sector_peer_rs_scores()
-    end_time = time.time()
-    logger.info(f"Total execution time: {end_time - start_time:.2f} seconds")
+    try:
+        start_time = time.time()
+        calculate_and_store_sector_peer_rs_scores()
+        end_time = time.time()
+        logger.info(f"Total execution time: {end_time - start_time:.2f} seconds")
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred: {e}")
