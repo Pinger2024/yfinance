@@ -190,3 +190,25 @@ def calculate_and_store_sector_peer_rs_scores():
                     logger.info(f"Bulk write completed for {len(all_updates)} updates")
                     all_updates = []
             except Exception as exc:
+                print(f"{ticker} generated an exception: {exc}")
+                logger.error(f"{ticker} generated an exception: {exc}")
+    
+    if all_updates:
+        ohlcv_collection.bulk_write(all_updates)
+        print(f"Final bulk write completed for {len(all_updates)} updates")
+        logger.info(f"Final bulk write completed for {len(all_updates)} updates")
+    
+    print("Completed sector peer RS score calculation.")
+    logger.info("Completed sector peer RS score calculation.")
+
+if __name__ == "__main__":
+    try:
+        print("Main execution started")
+        start_time = time.time()
+        calculate_and_store_sector_peer_rs_scores()
+        end_time = time.time()
+        print(f"Main execution completed in {end_time - start_time:.2f} seconds")
+        logger.info(f"Main execution completed in {end_time - start_time:.2f} seconds")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
