@@ -1,74 +1,33 @@
-import pymongo
-from pymongo.errors import AutoReconnect
-from pymongo import MongoClient
-import logging
-import pandas as pd
-import time
+# Function to calculate RS score based on multiple periods (same as the original RS score calculation)
+def calculate_rs_score(merged_df):
+    periods = [63, 126, 189, 252]  # Look-back periods in days
+    weights = [2, 1, 1, 1]  # Weights for each period
+    rs_values = []
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+    for i, period in enumerate(periods):
+        n = min(len(merged_df) - 1, period)
+        if n > 0:
+            current_ticker_close = merged_df['close_ticker'].iloc[-1]
+            previous_ticker_close = merged_df['close_ticker'].iloc[-(n+1)]
+            current_peer_avg_close = merged_df['close_peer_avg'].iloc[-1]
+            previous_peer_avg_close = merged_df['close_peer_avg'].iloc[-(n+1)]
 
-# MongoDB connection setup with extended timeout
-mongo_uri = 'mongodb://mongodb-9iyq:27017'
-client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
-db = client['StockData']
-ohlcv_collection = db['ohlcv_data']
-indicators_collection = db['indicators']
+            rs_value = (current_ticker_close / previous_ticker_close) - \
+                       (current_peer_avg_close / previous_peer_avg_close)
+            rs_values.append(rs_value)
+        else:
+            rs_values.append(0.0)
 
-# Function to retry on AutoReconnect errors
-def retry_on_reconnect(func):
-    def wrapper(*args, **kwargs):
-        retries = 5
-        for attempt in range(retries):
-            try:
-                return func(*args, **kwargs)
-            except AutoReconnect as e:
-                logging.error(f"AutoReconnect error: {e}. Retrying ({attempt + 1}/{retries})...")
-                time.sleep(2 ** attempt)  # Exponential backoff
-        raise Exception("Exceeded maximum retry attempts")
-    return wrapper
+    # Calculate the raw RS score using weighted sum
+    rs_raw = sum([rs_values[i] * weights[i] for i in range(len(rs_values))])
+    max_score = sum(weights)
+    min_score = -max_score
 
-# Peer RS calculation for sectors and industries
-@retry_on_reconnect
-def calculate_and_store_peer_rs_scores(batch_size=20, lookback_days=90):
-    logging.info("Starting peer RS score calculation (sector and industry)...")
-    
-    tickers = indicators_collection.distinct("ticker")
-    
-    for i in range(0, len(tickers), batch_size):
-        batch_tickers = tickers[i:i+batch_size]
-        
-        for ticker in batch_tickers:
-            logging.info(f"Processing ticker: {ticker}")
-            
-            # Fetch ticker's data (limit to 'lookback_days' for efficiency)
-            ticker_data = list(ohlcv_collection.find(
-                {"ticker": ticker}
-            ).sort("date", -1).limit(lookback_days))
-            
-            if not ticker_data:
-                continue
+    # Normalize the RS score to fit between 1 and 99
+    rs_score = normalize_rs_score(rs_raw, max_score, min_score)
+    return max(1, min(99, rs_score))  # Ensure the score stays within 1 and 99
 
-            # Create a DataFrame for the ticker data
-            ticker_df = pd.DataFrame(ticker_data)
-            ticker_df['date'] = pd.to_datetime(ticker_df['date'])
-
-            # Get sector and industry for this ticker
-            ticker_info = indicators_collection.find_one({"ticker": ticker}, {"sector": 1, "industry": 1})
-            sector = ticker_info.get("sector")
-            industry = ticker_info.get("industry")
-
-            # Process Sector Peer RS
-            if sector:
-                process_peer_rs(ticker, ticker_df, "sector", sector, lookback_days)
-
-            # Process Industry Peer RS
-            if industry:
-                process_peer_rs(ticker, ticker_df, "industry", industry, lookback_days)
-        
-    logging.info("Completed peer RS score calculation.")
-
-# Helper function to calculate and store peer RS scores
+# Function to process peer RS scores (using the same logic as original RS)
 def process_peer_rs(ticker, ticker_df, category, category_value, lookback_days):
     logging.info(f"Calculating {category} peer RS for {ticker} in {category_value}")
 
@@ -77,7 +36,7 @@ def process_peer_rs(ticker, ticker_df, category, category_value, lookback_days):
 
     if not peer_tickers:
         return
-    
+
     # Fetch peer data (limit to 'lookback_days')
     peer_data = list(ohlcv_collection.find(
         {"ticker": {"$in": peer_tickers}}
@@ -85,31 +44,28 @@ def process_peer_rs(ticker, ticker_df, category, category_value, lookback_days):
 
     if not peer_data:
         return
-    
+
     # Create a DataFrame for peer data and calculate the peer average
     peer_df = pd.DataFrame(peer_data)
     peer_df['date'] = pd.to_datetime(peer_df['date'])
     peer_avg = peer_df.groupby("date")["close"].mean().reset_index()
-    peer_avg.rename(columns={"close": f"{category}_avg"}, inplace=True)
+    peer_avg.rename(columns={"close": "close_peer_avg"}, inplace=True)
 
-    # Merge ticker data with peer average and calculate peer RS
-    merged_df = pd.merge(ticker_df, peer_avg, on="date", how="inner")
+    # Merge ticker data with peer average
+    merged_df = pd.merge(ticker_df[['date', 'close']], peer_avg, on="date", how="inner")
+    merged_df.rename(columns={"close": "close_ticker"}, inplace=True)
 
     # Check if merged_df has rows before proceeding
     if merged_df.empty:
         logging.warning(f"No matching data found for {ticker} in {category}: {category_value}")
         return
 
-    # Calculate peer RS score
-    merged_df[f"peer_rs_{category}"] = (merged_df["close"] - merged_df[f"{category}_avg"]) / merged_df[f"{category}_avg"] * 100
+    # Calculate peer RS score using the same method as original RS score
+    peer_rs_score = calculate_rs_score(merged_df)
 
-    # Update OHLCV collection with peer RS score
-    peer_rs_score = merged_df[f"peer_rs_{category}"].iloc[-1]  # Latest peer RS score
+    # Update OHLCV collection with the peer RS score
     ohlcv_collection.update_many(
         {"ticker": ticker, "date": {"$gte": merged_df['date'].min(), "$lte": merged_df['date'].max()}},
         {"$set": {f"peer_rs_score_{category}": peer_rs_score}}
     )
     logging.info(f"Stored peer RS score for {ticker} in {category}: {peer_rs_score}")
-
-if __name__ == "__main__":
-    calculate_and_store_peer_rs_scores(batch_size=20, lookback_days=90)
