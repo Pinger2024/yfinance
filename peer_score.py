@@ -94,6 +94,13 @@ def process_peer_rs(ticker, ticker_df, category, category_value, lookback_days):
 
     # Merge ticker data with peer average and calculate peer RS
     merged_df = pd.merge(ticker_df, peer_avg, on="date", how="inner")
+
+    # Check if merged_df has rows before proceeding
+    if merged_df.empty:
+        logging.warning(f"No matching data found for {ticker} in {category}: {category_value}")
+        return
+
+    # Calculate peer RS score
     merged_df[f"peer_rs_{category}"] = (merged_df["close"] - merged_df[f"{category}_avg"]) / merged_df[f"{category}_avg"] * 100
 
     # Update OHLCV collection with peer RS score
