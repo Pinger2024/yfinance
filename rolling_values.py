@@ -1,9 +1,6 @@
 from pymongo import MongoClient
 import pandas as pd
-import logging
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+import numpy as np
 
 # MongoDB connection setup
 mongo_uri = 'mongodb://mongodb-9iyq:27017'
@@ -11,40 +8,49 @@ client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 
-def calculate_rolling_return(df, num_days):
-    if len(df) >= num_days:
-        end_price = df.iloc[-1]['close']
-        start_price = df.iloc[-num_days]['close']
-        return ((end_price / start_price) - 1) * 100
-    return None
+# Ticker to analyze
+ticker = "TSLA"
 
-def update_rolling_returns(ticker):
-    try:
-        # Fetch OHLCV data for the given ticker
-        ohlcv_data = pd.DataFrame(list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1)))
-        
-        if ohlcv_data.empty:
-            logging.warning(f"No data found for ticker {ticker}")
-            return
+# Fetch all OHLCV data for the given ticker and sort by date
+ohlcv_data = pd.DataFrame(list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1)))
 
-        # Iterate over each row to calculate RS1, RS2, RS3, RS4
-        for i in range(len(ohlcv_data)):
-            current_data = ohlcv_data.iloc[:i+1]  # Get data from start to the current row
-            
-            rs1 = calculate_rolling_return(current_data, 63)
-            rs2 = calculate_rolling_return(current_data, 126)
-            rs3 = calculate_rolling_return(current_data, 189)
-            rs4 = calculate_rolling_return(current_data, 252)
-            
-            # Update the document in MongoDB
-            update_query = {"_id": ohlcv_data.iloc[i]["_id"]}
-            update_values = {"$set": {"RS1": rs1, "RS2": rs2, "RS3": rs3, "RS4": rs4}}
-            ohlcv_collection.update_one(update_query, update_values)
+# If there are no records, exit
+if ohlcv_data.empty:
+    print(f"No OHLCV data found for ticker {ticker}.")
+    exit()
 
-        logging.info(f"Successfully updated rolling RS values for {ticker}")
-    except Exception as e:
-        logging.error(f"Error updating rolling RS values for {ticker}: {e}")
+# Calculate rolling returns
+for index, row in ohlcv_data.iterrows():
+    # Define RS1, RS2, RS3, RS4 (in trading days)
+    rolling_periods = {
+        "RS1": 63,
+        "RS2": 126,
+        "RS3": 189,
+        "RS4": 252
+    }
 
-if __name__ == "__main__":
-    ticker = "TSLA"
-    update_rolling_returns(ticker)
+    for rs_label, period in rolling_periods.items():
+        # Ensure we have enough data for the rolling period
+        if index >= period:
+            # Calculate the rolling return as percentage change between current close and start close
+            start_price = ohlcv_data.iloc[index - period]['close']
+            end_price = row['close']
+            rolling_return = ((end_price - start_price) / start_price) * 100
+
+            # Update the rolling return in the dataframe
+            ohlcv_data.at[index, rs_label] = rolling_return
+        else:
+            # Not enough data to calculate rolling return for the period
+            ohlcv_data.at[index, rs_label] = None
+
+# Update MongoDB with the calculated RS values
+for index, row in ohlcv_data.iterrows():
+    update_fields = {
+        "RS1": row.get("RS1"),
+        "RS2": row.get("RS2"),
+        "RS3": row.get("RS3"),
+        "RS4": row.get("RS4")
+    }
+    ohlcv_collection.update_one({"_id": row["_id"]}, {"$set": update_fields})
+
+print(f"Updated RS values for ticker {ticker}.")
