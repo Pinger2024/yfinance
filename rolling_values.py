@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import datetime
 
 # MongoDB connection setup
-mongo_uri = 'mongodb+srv://<your_connection_string>'
+mongo_uri = 'mongodb://mongodb-9iyq:27017'
 client = MongoClient(mongo_uri)
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
