@@ -13,45 +13,9 @@ client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
-sector_trends_collection = db['sector_trends']
 
 # List of tickers to process
 tickers = ohlcv_collection.distinct('ticker')
-
-# Benchmark ticker for S&P 500 (^GSPC)
-benchmark_ticker = '^GSPC'
-
-# Function to normalize RS score to 1-99 range
-def normalize_rs_score(rs_raw, max_score, min_score):
-    return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
-
-# Function to calculate RS score based on multiple periods
-def calculate_rs_score(merged_df):
-    periods = [63, 126, 189, 252]
-    weights = [2, 1, 1, 1]
-    rs_values = []
-
-    for i, period in enumerate(periods):
-        n = min(len(merged_df) - 1, period)
-        if n > 0:
-            current_ticker_close = merged_df['close_ticker'].iloc[-1]
-            previous_ticker_close = merged_df['close_ticker'].iloc[-(n+1)]
-            current_benchmark_close = merged_df['close_benchmark'].iloc[-1]
-            previous_benchmark_close = merged_df['close_benchmark'].iloc[-(n+1)]
-
-            rs_value = (current_ticker_close / previous_ticker_close) - \
-                       (current_benchmark_close / previous_benchmark_close)
-            rs_values.append(rs_value)
-        else:
-            rs_values.append(0.0)
-
-    rs_raw = sum([rs_values[i] * weights[i] for i in range(len(rs_values))])
-    max_score = sum(weights)
-    min_score = -max_score
-    rs_score = normalize_rs_score(rs_raw, max_score, min_score)
-    rs_score = max(1, min(99, rs_score))
-
-    return rs_score
 
 # Fetch and update daily OHLCV data
 def fetch_daily_ohlcv_data():
@@ -79,123 +43,118 @@ def fetch_daily_ohlcv_data():
                 {"$set": data},
                 upsert=True
             )
+    logging.info("Daily OHLCV data updated successfully.")
 
-# Calculate and store RS scores in both collections
-def calculate_and_store_rs_scores():
-    # Load benchmark data from MongoDB
-    benchmark_data = list(ohlcv_collection.find({"ticker": benchmark_ticker}).sort("date", 1))
-    benchmark_df = pd.DataFrame(benchmark_data)
-    benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
+# Function to calculate RS values (RS1, RS2, RS3, RS4) and daily percentage change
+def calculate_rs_values():
+    periods = {
+        "RS1": 63,
+        "RS2": 126,
+        "RS3": 189,
+        "RS4": 252
+    }
 
-    # Iterate over all tickers and calculate RS scores
     for ticker in tickers:
-        ticker_data = list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1))
+        # Fetch historical data for the ticker
+        history = list(ohlcv_collection.find({"ticker": ticker}).sort("date", -1).limit(252))
+        if len(history) < 252:
+            logging.warning(f"Not enough data to calculate RS for ticker {ticker}")
+            continue
 
-        if len(ticker_data) > 0:
-            ticker_df = pd.DataFrame(ticker_data)
-            ticker_df['date'] = pd.to_datetime(ticker_df['date'])
+        history_df = pd.DataFrame(history)
+        history_df['daily_pct_change'] = history_df['close'].pct_change() * 100
 
-            # Merge on 'date' to align the data
-            merged_df = pd.merge(ticker_df[['date', 'close']], benchmark_df[['date', 'close']], on='date', suffixes=('_ticker', '_benchmark'))
-            merged_df = merged_df.sort_values('date').reset_index(drop=True)
-
-            if len(merged_df) >= 1:
-                rs_score = calculate_rs_score(merged_df)
-
-                # Update ohlcv_data collection with RS score
-                ohlcv_collection.update_many(
-                    {"ticker": ticker, "date": {"$gte": merged_df['date'].min(), "$lte": merged_df['date'].max()}},
-                    {"$set": {"rs_score": rs_score}}
-                )
-
-                # Store RS score in the indicators collection
-                latest_data = ticker_df.iloc[-1]
-                indicator_data = {
-                    "ticker": ticker,
-                    "rs_score": rs_score,
-                    "date": latest_data['date'],
-                    # You can add other indicator fields as needed
-                }
-
-                indicators_collection.update_one(
-                    {"ticker": ticker},
-                    {"$set": indicator_data},
+        # Calculate rolling returns for RS1, RS2, RS3, RS4
+        for rs_key, period in periods.items():
+            if len(history_df) >= period:
+                rolling_return = (history_df['close'].iloc[0] - history_df['close'].iloc[period]) / history_df['close'].iloc[period] * 100
+                ohlcv_collection.update_one(
+                    {"ticker": ticker, "date": history_df['date'].iloc[0]},
+                    {"$set": {rs_key: rolling_return}},
                     upsert=True
                 )
 
-                logging.info(f"Stored RS score for {ticker}: {rs_score}")
-
-# Calculate sector and industry trends
-def calculate_sector_and_industry_trends():
-    # Get today's date
-    today = datetime.now().strftime('%Y-%m-%d')
-
-    # Aggregate sector data
-    pipeline_sector = [
-        {"$match": {"date": today, "sector": {"$exists": True, "$ne": None}}},
-        {"$group": {
-            "_id": "$sector",
-            "average_rs": {"$avg": "$rs_score"},
-            "tickers_in_sector": {"$addToSet": "$ticker"}
-        }}
-    ]
-    sector_data = list(ohlcv_collection.aggregate(pipeline_sector))
-
-    # Aggregate industry data
-    pipeline_industry = [
-        {"$match": {"date": today, "industry": {"$exists": True, "$ne": None}}},
-        {"$group": {
-            "_id": "$industry",
-            "average_rs": {"$avg": "$rs_score"},
-            "tickers_in_industry": {"$addToSet": "$ticker"}
-        }}
-    ]
-    industry_data = list(ohlcv_collection.aggregate(pipeline_industry))
-
-    # Insert or update sector and industry data in sector_trends_collection
-    for sector in sector_data:
-        sector_trend = {
-            "date": today,
-            "sector": sector["_id"],
-            "average_rs": sector["average_rs"],
-            "tickers_in_sector": sector["tickers_in_sector"],
-            "type": "sector"
-        }
-        sector_trends_collection.update_one(
-            {"date": today, "sector": sector["_id"], "type": "sector"},
-            {"$set": sector_trend},
+        # Update daily percentage change
+        daily_pct_change = history_df['daily_pct_change'].iloc[0]
+        ohlcv_collection.update_one(
+            {"ticker": ticker, "date": history_df['date'].iloc[0]},
+            {"$set": {"daily_pct_change": daily_pct_change}},
             upsert=True
         )
-        logging.info(f"Stored sector data for {sector['_id']} on {today}")
+    
+    logging.info("RS values and daily percentage change calculated.")
 
-    for industry in industry_data:
-        industry_trend = {
-            "date": today,
-            "industry": industry["_id"],
-            "average_rs": industry["average_rs"],
-            "tickers_in_industry": industry["tickers_in_industry"],
-            "type": "industry"
-        }
-        sector_trends_collection.update_one(
-            {"date": today, "industry": industry["_id"], "type": "industry"},
-            {"$set": industry_trend},
+# Function to calculate and rank RS score using RS4, RS3, RS2, RS1 as fallbacks
+def calculate_rs_ranking():
+    latest_date = ohlcv_collection.find_one(
+        {"$or": [
+            {"RS4": {"$exists": True, "$ne": None}},
+            {"RS3": {"$exists": True, "$ne": None}},
+            {"RS2": {"$exists": True, "$ne": None}},
+            {"RS1": {"$exists": True, "$ne": None}},
+        ]},
+        sort=[("date", -1)],
+        projection={"date": 1}
+    )["date"]
+
+    logging.info(f"Latest trading date for RS values: {latest_date}")
+
+    cursor = ohlcv_collection.find(
+        {"date": latest_date, "$or": [
+            {"RS4": {"$exists": True, "$ne": None}},
+            {"RS3": {"$exists": True, "$ne": None}},
+            {"RS2": {"$exists": True, "$ne": None}},
+            {"RS1": {"$exists": True, "$ne": None}},
+        ]},
+        {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
+    ).sort("RS4", 1)
+
+    total_stocks = cursor.count()
+    rank = 1
+
+    for doc in cursor:
+        ticker = doc['ticker']
+        rs_value = (
+            doc.get('RS4') or
+            doc.get('RS3') or
+            doc.get('RS2') or
+            doc.get('RS1')
+        )
+
+        if rs_value is None:
+            continue  # Skip if no RS value is found
+
+        # Calculate percentile rank (convert rank to 1-99 scale)
+        percentile_rank = (rank / total_stocks) * 100
+        rs_score = max(1, min(99, round(percentile_rank)))  # Ensure it's between 1 and 99
+
+        # Log ticker rank info
+        logging.info(f"Ticker: {ticker}, RS value: {rs_value}, Rank: {rank}, RS Score: {rs_score}")
+
+        # Update the indicators collection with the new RS score
+        indicators_collection.update_one(
+            {"ticker": ticker, "date": latest_date},
+            {"$set": {"rs_score": rs_score}},
             upsert=True
         )
-        logging.info(f"Stored industry data for {industry['_id']} on {today}")
+
+        rank += 1
+
+    logging.info("RS ranking and score calculation completed.")
 
 # Run the daily cron job
 def run_daily_cron_job():
     logging.info("Starting daily cron job...")
-    
+
     # Step 1: Fetch today's OHLCV data for all tickers
     fetch_daily_ohlcv_data()
-    
-    # Step 2: Calculate RS scores for all tickers
-    calculate_and_store_rs_scores()
 
-    # Step 3: Calculate sector and industry trends
-    calculate_sector_and_industry_trends()
-    
+    # Step 2: Calculate RS values and daily percentage change
+    calculate_rs_values()
+
+    # Step 3: Calculate RS scores for all tickers
+    calculate_rs_ranking()
+
     logging.info("Daily cron job completed.")
 
 if __name__ == "__main__":
