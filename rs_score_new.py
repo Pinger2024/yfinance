@@ -19,7 +19,7 @@ def calculate_rs_ranking():
     cursor = ohlcv_collection.find(
         {"RS4": {"$exists": True, "$ne": None}},  # Exclude null RS4 values
         {"ticker": 1, "RS4": 1}
-    ).batch_size(1000)  # Adjust batch size as needed
+    ).batch_size(6000)  # Adjust batch size as needed
 
     # Process data in chunks
     chunk_size = 10000
