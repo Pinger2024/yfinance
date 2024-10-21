@@ -43,7 +43,7 @@ def calculate_rs_ranking():
         {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
     ).sort("RS4", 1)
     
-    total_stocks = ohlcv_collection.count_documents(query)  # Use count_documents instead of cursor.count()
+    total_stocks = ohlcv_collection.count_documents(query)  # Correct method for counting documents
     rank = 1
     bulk_ops = []
     
