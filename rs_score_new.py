@@ -38,12 +38,13 @@ def calculate_rs_ranking():
             {"RS1": {"$exists": True, "$ne": None}}
         ]
     }
+    # Sort by ticker alphabetically instead of RS4
     cursor = ohlcv_collection.find(
         query,
         {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
-    ).sort("RS4", 1)
+    ).sort("ticker", 1)  # Alphabetical sorting by ticker
     
-    total_stocks = ohlcv_collection.count_documents(query)  # Correct method for counting documents
+    total_stocks = ohlcv_collection.count_documents(query)
     rank = 1
     bulk_ops = []
     
