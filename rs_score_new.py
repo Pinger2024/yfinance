@@ -17,7 +17,7 @@ indicators_collection = db['indicators']
 def calculate_rs_ranking():
     # Fetch all stocks with RS4 values
     cursor = ohlcv_collection.find(
-        {"RS4": {"$exists": True}},
+        {"RS4": {"$exists": True, "$ne": None}},  # Exclude null RS4 values
         {"ticker": 1, "RS4": 1}
     ).batch_size(1000)  # Adjust batch size as needed
 
@@ -26,7 +26,8 @@ def calculate_rs_ranking():
     all_data = []
     
     for doc in cursor:
-        all_data.append((doc['ticker'], doc['RS4']))
+        if isinstance(doc['RS4'], (int, float)):  # Ensure RS4 is a number
+            all_data.append((doc['ticker'], doc['RS4']))
         
         if len(all_data) >= chunk_size:
             process_chunk(all_data)
@@ -47,20 +48,21 @@ def calculate_rs_ranking():
 
 def process_chunk(data):
     df = pd.DataFrame(data, columns=['ticker', 'RS4'])
-    df['rank'] = df['RS4'].rank(pct=True) * 100
-    df['rs_score'] = df['rank'].apply(lambda x: max(1, min(99, round(x))))
+    df['rank'] = df['RS4'].rank(pct=True, method='min') * 100  # Use 'min' method for ties
+    df['rs_score'] = df['rank'].apply(lambda x: max(1, min(99, round(float(x)))) if pd.notna(x) else 1)
 
     bulk_ops = [
         UpdateOne(
             {"ticker": row['ticker']},
-            {"$set": {"rs_score": row['rs_score']}},
+            {"$set": {"rs_score": int(row['rs_score'])}},
             upsert=True
         )
         for _, row in df.iterrows()
     ]
 
     try:
-        indicators_collection.bulk_write(bulk_ops, ordered=False)
+        result = indicators_collection.bulk_write(bulk_ops, ordered=False)
+        logging.info(f"Processed chunk: {result.upserted_count} upserted, {result.modified_count} modified")
     except BulkWriteError as bwe:
         logging.warning(f"Bulk write error: {bwe.details}")
 
