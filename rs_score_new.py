@@ -18,11 +18,13 @@ def calculate_rs_ranking():
         {"ticker": 1, "RS4": 1}
     ).sort("RS4", 1)  # Sort by RS4 in ascending order
 
-    # Step 2: Assign ranks iteratively and normalize to 1-99 scale
     total_stocks = ohlcv_collection.count_documents({"RS4": {"$exists": True, "$ne": None}})
     rank = 1
     bulk_ops = []
     
+    logging.info(f"Total stocks with RS4: {total_stocks}")
+    
+    # Step 2: Iterate through the cursor and rank each stock
     for doc in cursor:
         ticker = doc['ticker']
         rs4_value = doc['RS4']
@@ -36,10 +38,13 @@ def calculate_rs_ranking():
             UpdateOne({"ticker": ticker}, {"$set": {"rs_score": rs_score}}, upsert=True)
         )
         
+        # Log individual stock rank info
+        logging.info(f"Ticker: {ticker}, RS4: {rs4_value}, Rank: {rank}, RS Score: {rs_score}")
+        
         # Increment rank
         rank += 1
         
-        # Step 3: Execute bulk write periodically (every 1000 records to avoid memory overuse)
+        # Step 3: Execute bulk write every 1000 records
         if len(bulk_ops) >= 1000:
             try:
                 result = indicators_collection.bulk_write(bulk_ops, ordered=False)
@@ -48,7 +53,7 @@ def calculate_rs_ranking():
                 logging.warning(f"Bulk write error: {bwe.details}")
             bulk_ops = []  # Reset for next chunk
     
-    # Step 4: Execute any remaining operations
+    # Step 4: Execute any remaining bulk operations
     if bulk_ops:
         try:
             result = indicators_collection.bulk_write(bulk_ops, ordered=False)
