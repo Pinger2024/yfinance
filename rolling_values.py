@@ -19,6 +19,9 @@ if ohlcv_data.empty:
     print(f"No OHLCV data found for ticker {ticker}.")
     exit()
 
+# Ensure the close column is numeric
+ohlcv_data['close'] = pd.to_numeric(ohlcv_data['close'], errors='coerce')
+
 # Calculate rolling returns
 for index, row in ohlcv_data.iterrows():
     # Define RS1, RS2, RS3, RS4 (in trading days)
@@ -32,10 +35,18 @@ for index, row in ohlcv_data.iterrows():
     for rs_label, period in rolling_periods.items():
         # Ensure we have enough data for the rolling period
         if index >= period:
-            # Calculate the rolling return as percentage change between current close and start close
             start_price = ohlcv_data.iloc[index - period]['close']
             end_price = row['close']
-            rolling_return = ((end_price - start_price) / start_price) * 100
+
+            # Skip calculation if start or end price is NaN
+            if np.isnan(start_price) or np.isnan(end_price):
+                rolling_return = None
+            else:
+                # Calculate the rolling return as percentage change between current close and start close
+                rolling_return = ((end_price - start_price) / start_price) * 100
+
+            # Log the details for debugging
+            print(f"Index: {index}, RS_Label: {rs_label}, Start Price: {start_price}, End Price: {end_price}, Rolling Return: {rolling_return}")
 
             # Update the rolling return in the dataframe
             ohlcv_data.at[index, rs_label] = rolling_return
@@ -51,6 +62,10 @@ for index, row in ohlcv_data.iterrows():
         "RS3": row.get("RS3"),
         "RS4": row.get("RS4")
     }
+
+    # Log the update details for debugging
+    print(f"Updating record with _id: {row['_id']} with RS values: {update_fields}")
+
     ohlcv_collection.update_one({"_id": row["_id"]}, {"$set": update_fields})
 
 print(f"Updated RS values for ticker {ticker}.")
