@@ -29,20 +29,21 @@ def calculate_rs_ranking():
     logging.info(f"Latest trading date for RS values: {latest_date}")
     
     # Step 2: Fetch all stocks for the latest date with any RS value (RS4, RS3, RS2, RS1)
+    query = {
+        "date": latest_date,
+        "$or": [
+            {"RS4": {"$exists": True, "$ne": None}},
+            {"RS3": {"$exists": True, "$ne": None}},
+            {"RS2": {"$exists": True, "$ne": None}},
+            {"RS1": {"$exists": True, "$ne": None}}
+        ]
+    }
     cursor = ohlcv_collection.find(
-        {
-            "date": latest_date,
-            "$or": [
-                {"RS4": {"$exists": True, "$ne": None}},
-                {"RS3": {"$exists": True, "$ne": None}},
-                {"RS2": {"$exists": True, "$ne": None}},
-                {"RS1": {"$exists": True, "$ne": None}}
-            ]
-        },
+        query,
         {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
     ).sort("RS4", 1)
     
-    total_stocks = cursor.count()
+    total_stocks = ohlcv_collection.count_documents(query)  # Use count_documents instead of cursor.count()
     rank = 1
     bulk_ops = []
     
