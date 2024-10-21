@@ -1,6 +1,8 @@
 from pymongo import MongoClient
 import pandas as pd
 import logging
+from pymongo.errors import BulkWriteError
+from pymongo import UpdateOne
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -11,48 +13,59 @@ db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
 
-# Function to normalize RS score to 1-99 range
-def normalize_rs_score(rs_raw, max_score, min_score):
-    return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
-
-# Function to rank stocks based on RS4
 def calculate_rs_ranking():
-    # Fetch RS4 values for all stocks
-    all_stocks_data = list(ohlcv_collection.aggregate([
-        {"$match": {"RS4": {"$exists": True}}},
-        {"$project": {"ticker": 1, "RS4": 1}}
-    ]))
+    # Fetch all stocks with RS4 values
+    cursor = ohlcv_collection.find(
+        {"RS4": {"$exists": True}},
+        {"ticker": 1, "RS4": 1}
+    ).batch_size(1000)  # Adjust batch size as needed
 
-    # Convert the data to a DataFrame for easier ranking
-    df = pd.DataFrame(all_stocks_data)
+    # Process data in chunks
+    chunk_size = 10000
+    all_rs4_values = []
     
-    # Check if there's data to process
-    if df.empty:
-        logging.error("No RS4 data available for any stocks.")
-        return
-
-    # Rank stocks by RS4 value (12-month cumulative return)
-    df['rank'] = df['RS4'].rank(pct=True) * 100  # Percentile rank
+    for chunk in pd.read_csv(cursor, chunksize=chunk_size):
+        all_rs4_values.extend(chunk['RS4'].tolist())
     
-    # Ensure RS score is between 1 and 99
-    df['rs_score'] = df['rank'].apply(lambda x: max(1, min(99, round(x))))
-
-    # Log the ranking result for TSLA as an example
-    tsla_rank = df[df['ticker'] == 'TSLA']
-    if not tsla_rank.empty:
-        logging.info(f"TSLA RS4: {tsla_rank.iloc[0]['RS4']}, RS Score: {tsla_rank.iloc[0]['rs_score']}")
-    else:
-        logging.warning("TSLA not found in the RS4 data.")
-
-    # Store the RS score in the indicators collection
-    for index, row in df.iterrows():
-        indicators_collection.update_one(
-            {"ticker": row['ticker']},
-            {"$set": {"rs_score": row['rs_score']}},
-            upsert=True
+    # Calculate percentile ranks for all RS4 values
+    percentile_ranks = pd.Series(all_rs4_values).rank(pct=True) * 100
+    
+    # Reset cursor to start
+    cursor.rewind()
+    
+    bulk_ops = []
+    for i, doc in enumerate(cursor):
+        rs_score = max(1, min(99, round(percentile_ranks[i])))
+        bulk_ops.append(
+            UpdateOne(
+                {"ticker": doc['ticker']},
+                {"$set": {"rs_score": rs_score}},
+                upsert=True
+            )
         )
-    
+        
+        if len(bulk_ops) == chunk_size:
+            try:
+                indicators_collection.bulk_write(bulk_ops, ordered=False)
+            except BulkWriteError as bwe:
+                logging.warning(f"Bulk write error: {bwe.details}")
+            bulk_ops = []
+
+    # Write any remaining operations
+    if bulk_ops:
+        try:
+            indicators_collection.bulk_write(bulk_ops, ordered=False)
+        except BulkWriteError as bwe:
+            logging.warning(f"Bulk write error: {bwe.details}")
+
     logging.info("RS4 ranking and score calculation completed.")
+
+    # Log TSLA info if available
+    tsla_info = indicators_collection.find_one({"ticker": "TSLA"})
+    if tsla_info and 'rs_score' in tsla_info:
+        logging.info(f"TSLA RS Score: {tsla_info['rs_score']}")
+    else:
+        logging.warning("TSLA RS Score not found.")
 
 if __name__ == "__main__":
     calculate_rs_ranking()
