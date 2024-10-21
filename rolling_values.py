@@ -1,71 +1,46 @@
 from pymongo import MongoClient
 import pandas as pd
-import numpy as np
+from datetime import datetime
 
 # MongoDB connection setup
-mongo_uri = 'mongodb://mongodb-9iyq:27017'
-client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
+mongo_uri = 'mongodb+srv://<your_connection_string>'
+client = MongoClient(mongo_uri)
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 
-# Ticker to analyze
-ticker = "TSLA"
+# Function to calculate rolling returns and daily percentage change
+def calculate_rs_and_pct_change(data, window_size):
+    # Calculate rolling returns based on the window size
+    rolling_returns = (data['close'].shift(0) - data['close'].shift(window_size)) / data['close'].shift(window_size) * 100
+    return rolling_returns
 
-# Fetch all OHLCV data for the given ticker and sort by date
+# Fetch the OHLCV data for the specific ticker (TSLA for this example)
+ticker = "TSLA"
 ohlcv_data = pd.DataFrame(list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1)))
 
-# If there are no records, exit
-if ohlcv_data.empty:
-    print(f"No OHLCV data found for ticker {ticker}.")
-    exit()
+# Ensure we have data sorted by date
+ohlcv_data['date'] = pd.to_datetime(ohlcv_data['date'])
+ohlcv_data.sort_values(by='date', inplace=True)
 
-# Ensure the close column is numeric
-ohlcv_data['close'] = pd.to_numeric(ohlcv_data['close'], errors='coerce')
+# Calculate the daily percentage change
+ohlcv_data['daily_pct_change'] = ohlcv_data['close'].pct_change() * 100
 
-# Calculate rolling returns
+# Calculate rolling returns for RS1, RS2, RS3, and RS4
+ohlcv_data['RS1'] = calculate_rs_and_pct_change(ohlcv_data, 63)  # 63-day rolling return
+ohlcv_data['RS2'] = calculate_rs_and_pct_change(ohlcv_data, 126) # 126-day rolling return
+ohlcv_data['RS3'] = calculate_rs_and_pct_change(ohlcv_data, 189) # 189-day rolling return
+ohlcv_data['RS4'] = calculate_rs_and_pct_change(ohlcv_data, 252) # 252-day rolling return
+
+# Update the database with the new fields: daily_pct_change, RS1, RS2, RS3, RS4
 for index, row in ohlcv_data.iterrows():
-    # Define RS1, RS2, RS3, RS4 (in trading days)
-    rolling_periods = {
-        "RS1": 63,
-        "RS2": 126,
-        "RS3": 189,
-        "RS4": 252
+    _id = row['_id']  # MongoDB record identifier
+    update_data = {
+        "daily_pct_change": row['daily_pct_change'],
+        "RS1": row['RS1'],
+        "RS2": row['RS2'],
+        "RS3": row['RS3'],
+        "RS4": row['RS4']
     }
+    ohlcv_collection.update_one({"_id": _id}, {"$set": update_data})
 
-    for rs_label, period in rolling_periods.items():
-        # Ensure we have enough data for the rolling period
-        if index >= period:
-            start_price = ohlcv_data.iloc[index - period]['close']
-            end_price = row['close']
-
-            # Skip calculation if start or end price is NaN
-            if np.isnan(start_price) or np.isnan(end_price):
-                rolling_return = None
-            else:
-                # Calculate the rolling return as percentage change between current close and start close
-                rolling_return = ((end_price - start_price) / start_price) * 100
-
-            # Log the details for debugging
-            print(f"Index: {index}, RS_Label: {rs_label}, Start Price: {start_price}, End Price: {end_price}, Rolling Return: {rolling_return}")
-
-            # Update the rolling return in the dataframe
-            ohlcv_data.at[index, rs_label] = rolling_return
-        else:
-            # Not enough data to calculate rolling return for the period
-            ohlcv_data.at[index, rs_label] = None
-
-# Update MongoDB with the calculated RS values
-for index, row in ohlcv_data.iterrows():
-    update_fields = {
-        "RS1": row.get("RS1"),
-        "RS2": row.get("RS2"),
-        "RS3": row.get("RS3"),
-        "RS4": row.get("RS4")
-    }
-
-    # Log the update details for debugging
-    print(f"Updating record with _id: {row['_id']} with RS values: {update_fields}")
-
-    ohlcv_collection.update_one({"_id": row["_id"]}, {"$set": update_fields})
-
-print(f"Updated RS values for ticker {ticker}.")
+print("Daily percentage change and RS values updated successfully!")
