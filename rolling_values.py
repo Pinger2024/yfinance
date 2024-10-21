@@ -1,22 +1,24 @@
 from pymongo import MongoClient
 import pandas as pd
+from datetime import datetime
 
-# MongoDB setup (using the existing connection string)
-client = MongoClient("mongodb+srv://Cluster92274:e0NJV3BKe1Jq@cluster92274.dmm5f.mongodb.net/?retryWrites=true&w=majority&appName=Cluster92274")
+# MongoDB connection setup (using your existing configuration)
+mongo_uri = 'mongodb://mongodb-9iyq:27017'
+client = MongoClient(mongo_uri, connectTimeoutMS=60000, socketTimeoutMS=60000)
 db = client['StockData']
-ohlcv_collection = db['ohlcv_data']  # Ensure the collection name is correct
+ohlcv_collection = db['ohlcv_data']
 
 # Define the stock ticker (TSLA for now)
 ticker = 'TSLA'
 
-# Fetch OHLCV data for the specific ticker from MongoDB
-ohlcv_data = pd.DataFrame(list(ohlcv_collection.find({"ticker": ticker})))
+# Fetch OHLCV data from MongoDB
+ohlcv_data = pd.DataFrame(list(ohlcv_collection.find({"ticker": ticker}, {"_id": 0, "date": 1, "close": 1})))
 
-# Convert 'date' field to datetime and set as index
+# Ensure the 'date' field is in datetime format
 ohlcv_data['date'] = pd.to_datetime(ohlcv_data['date'])
 ohlcv_data.set_index('date', inplace=True)
 
-# Ensure data is sorted by date
+# Sort the data by date
 ohlcv_data.sort_index(inplace=True)
 
 # Calculate rolling returns (63-day, 126-day, 189-day, 252-day)
@@ -33,7 +35,7 @@ for index, row in ohlcv_data.iterrows():
     # Create a document for each day
     document = {
         "ticker": ticker,
-        "date": row.name,
+        "date": index,
         "RS1": row['RS1'],
         "RS2": row['RS2'],
         "RS3": row['RS3'],
@@ -42,7 +44,7 @@ for index, row in ohlcv_data.iterrows():
     
     # Update the document if the date already exists, or insert it
     ohlcv_collection.update_one(
-        {"ticker": ticker, "date": row.name},
+        {"ticker": ticker, "date": index},
         {"$set": document},
         upsert=True
     )
