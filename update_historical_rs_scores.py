@@ -18,11 +18,16 @@ class RSScoreCalculator:
         self.ohlcv_collection = self.db['ohlcv_data']
         self.indicators_collection = self.db['indicators']
         
+    def get_stock_metadata(self, ticker):
+        """Get sector and industry information for a stock."""
+        metadata = self.indicators_collection.find_one(
+            {"ticker": ticker},
+            {"sector": 1, "industry": 1}
+        )
+        return metadata if metadata else {"sector": None, "industry": None}
+
     def calculate_weighted_rs_score(self, ticker):
-        """
-        Calculate weighted RS score for a stock using multiple timeframes.
-        Returns both raw and weighted scores for transparency.
-        """
+        """Calculate weighted RS score for a stock using multiple timeframes."""
         try:
             # Get the latest date with RS values
             latest_date = self.ohlcv_collection.find_one(
@@ -52,6 +57,9 @@ class RSScoreCalculator:
                 logging.warning(f"No RS data for {ticker} on {latest_date}")
                 return None
             
+            # Get stock metadata
+            metadata = self.get_stock_metadata(ticker)
+            
             # Define weights for different timeframes
             weights = {
                 "RS1": 0.40,  # 40% weight for 3-month RS
@@ -66,72 +74,78 @@ class RSScoreCalculator:
                 for i in range(1, 5)
             )
             
-            # Store raw RS values for transparency
-            raw_scores = {
-                f"RS{i}": rs_data.get(f"RS{i}", 0)
-                for i in range(1, 5)
-            }
-            
             return {
                 "ticker": ticker,
                 "date": latest_date,
                 "weighted_score": weighted_score,
-                "raw_scores": raw_scores
+                "sector": metadata.get("sector"),
+                "industry": metadata.get("industry")
             }
             
         except Exception as e:
             logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
             return None
 
-    def normalize_scores(self, scores):
+    def normalize_scores(self, scores, groupby=None):
         """
         Normalize RS scores to a 1-99 range using percentile ranking.
-        This ensures an even distribution across the range, handling non-finite values.
+        If groupby is provided, normalize within each group.
         """
         if not scores:
             return []
             
-        # Extract weighted scores and filter out invalid ones (e.g., NaN, inf)
-        weighted_scores = [s['weighted_score'] for s in scores if np.isfinite(s['weighted_score'])]
+        # Convert to DataFrame for easier grouping
+        df = pd.DataFrame(scores)
         
-        if len(weighted_scores) == 0:
-            logging.error("No valid weighted scores available for normalization")
-            return []
-        
-        # Calculate percentile ranks (0 to 1) only for valid scores
-        percentile_ranks = pd.Series(weighted_scores).rank(pct=True)
-        
-        # Convert to 1-99 range
-        normalized_scores = (percentile_ranks * 98 + 1).round().astype(int)
-        
-        # Update scores with normalized values and handle non-finite cases
-        valid_scores = [s for s in scores if np.isfinite(s['weighted_score'])]
-        for score, normalized in zip(valid_scores, normalized_scores):
-            score['rs_score'] = normalized
+        if groupby:
+            # Group by the specified field and calculate percentile ranks within each group
+            df['normalized_score'] = df.groupby(groupby)['weighted_score'].transform(
+                lambda x: x.rank(pct=True) * 98 + 1
+            ).round().astype(int)
+        else:
+            # Calculate overall percentile ranks
+            df['normalized_score'] = (
+                df['weighted_score'].rank(pct=True) * 98 + 1
+            ).round().astype(int)
             
-        return valid_scores
+        # Convert back to list of dictionaries
+        return df.to_dict('records')
 
     def update_database(self, scores):
-        """Update the database with new RS scores and ranks."""
+        """Update the database with only the essential RS scores and ranks."""
         if not scores:
             return
             
-        # Sort by RS score in descending order
-        scores_sorted = sorted(scores, key=lambda x: x['rs_score'], reverse=True)
+        # Convert to DataFrame for easier manipulation
+        df = pd.DataFrame(scores)
         
-        # Prepare bulk operations
+        # Calculate ranks for different groupings
+        df['market_rank'] = df['market_score'].rank(ascending=False, method='min').astype(int)
+        df['sector_rank'] = df.groupby('sector')['sector_score'].rank(ascending=False, method='min').astype(int)
+        df['industry_rank'] = df.groupby('industry')['industry_score'].rank(ascending=False, method='min').astype(int)
+        
+        # Prepare bulk operations with only essential fields
         bulk_operations = []
-        for rank, score in enumerate(scores_sorted, 1):
+        for _, row in df.iterrows():
             bulk_operations.append(
                 UpdateOne(
                     {
-                        "ticker": score['ticker'],
-                        "date": score['date']
+                        "ticker": row['ticker'],
+                        "date": row['date']
                     },
                     {
                         "$set": {
-                            "rs_score": score['rs_score'],
-                            "rs_rank": rank
+                            # Market score and rank
+                            "rs_score_market": int(row['market_score']),
+                            "rs_rank_market": int(row['market_rank']),
+                            
+                            # Sector score and rank
+                            "rs_score_sector": int(row['sector_score']),
+                            "rs_rank_sector": int(row['sector_rank']),
+                            
+                            # Industry score and rank
+                            "rs_score_industry": int(row['industry_score']),
+                            "rs_rank_industry": int(row['industry_rank'])
                         }
                     },
                     upsert=True
@@ -157,11 +171,22 @@ class RSScoreCalculator:
                 if result:
                     scores.append(result)
             
-            # Normalize scores
-            scores_normalized = self.normalize_scores(scores)
+            # Calculate different types of scores
+            market_scores = self.normalize_scores(scores)
+            sector_scores = self.normalize_scores(scores, groupby='sector')
+            industry_scores = self.normalize_scores(scores, groupby='industry')
+            
+            # Combine all scores
+            final_scores = []
+            for market, sector, industry in zip(market_scores, sector_scores, industry_scores):
+                score_data = market.copy()
+                score_data['market_score'] = market['normalized_score']
+                score_data['sector_score'] = sector['normalized_score']
+                score_data['industry_score'] = industry['normalized_score']
+                final_scores.append(score_data)
             
             # Update database
-            self.update_database(scores_normalized)
+            self.update_database(final_scores)
             
             logging.info("RS score calculation completed successfully")
             
