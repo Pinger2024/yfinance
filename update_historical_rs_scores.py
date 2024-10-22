@@ -74,28 +74,33 @@ class RSScoreCalculator:
             logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
             return None
 
-    def normalize_scores(self, scores):
-        """
-        Normalize RS scores to a 1-99 range using percentile ranking.
-        This ensures an even distribution across the range.
-        """
-        if not scores:
-            return []
-            
-        # Extract weighted scores
-        weighted_scores = [s['weighted_score'] for s in scores]
-        
-        # Calculate percentile ranks (0 to 1)
-        percentile_ranks = pd.Series(weighted_scores).rank(pct=True)
-        
-        # Convert to 1-99 range
-        normalized_scores = (percentile_ranks * 98 + 1).round().astype(int)
-        
-        # Update scores with normalized values
-        for score, normalized in zip(scores, normalized_scores):
-            score['rs_score'] = normalized
-            
-        return scores
+   def normalize_scores(self, scores):
+    """
+    Normalize RS scores to a 1-99 range using percentile ranking.
+    This ensures an even distribution across the range, handling non-finite values.
+    """
+    if not scores:
+        return []
+    
+    # Extract weighted scores and filter out invalid ones (e.g., NaN, inf)
+    weighted_scores = [s['weighted_score'] for s in scores if np.isfinite(s['weighted_score'])]
+    
+    if len(weighted_scores) == 0:
+        logging.error("No valid weighted scores available for normalization")
+        return []
+    
+    # Calculate percentile ranks (0 to 1) only for valid scores
+    percentile_ranks = pd.Series(weighted_scores).rank(pct=True)
+    
+    # Convert to 1-99 range
+    normalized_scores = (percentile_ranks * 98 + 1).round().astype(int)
+    
+    # Update scores with normalized values and handle non-finite cases
+    valid_scores = [s for s in scores if np.isfinite(s['weighted_score'])]
+    for score, normalized in zip(valid_scores, normalized_scores):
+        score['rs_score'] = normalized
+    
+    return valid_scores
 
     def update_database(self, scores):
         """Update the database with new RS scores and ranks."""
