@@ -1,7 +1,6 @@
 import pandas as pd
 from pymongo import MongoClient, UpdateOne
 import logging
-from datetime import datetime
 
 # Setup basic logging
 logging.basicConfig(
@@ -9,120 +8,152 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# MongoDB connection setup
-client = MongoClient("mongodb://mongodb-9iyq:27017")
-db = client['StockData']
-ohlcv_collection = db['ohlcv_data']
-indicators_collection = db['indicators']
-
-def calculate_weighted_rs_score(ticker):
-    """
-    Calculate and rank RS score for a stock using weighted RS values.
-    """
-    try:
-        # Retrieve the most recent trading day
-        latest_date = ohlcv_collection.find_one(
-            {"ticker": ticker, "$or": [
-                {"RS4": {"$exists": True, "$ne": None}},
-                {"RS3": {"$exists": True, "$ne": None}},
-                {"RS2": {"$exists": True, "$ne": None}},
-                {"RS1": {"$exists": True, "$ne": None}},
-            ]},
-            sort=[("date", -1)],
-            projection={"date": 1}
-        )
-
-        if not latest_date:
-            logging.error(f"No records found with RS values for {ticker}")
-            return
-
-        latest_date = latest_date["date"]
-        logging.info(f"Latest trading date for RS values: {latest_date}")
-
-        # Fetch RS values for the ticker
-        rs_data = ohlcv_collection.find_one(
-            {"ticker": ticker, "date": latest_date},
-            {"RS1": 1, "RS2": 1, "RS3": 1, "RS4": 1}
-        )
-
-        if not rs_data:
-            logging.error(f"No RS data found for {ticker} on {latest_date}")
-            return
-
-        # Apply the weights: RS1 gets more weight
-        weights = {"RS1": 2, "RS2": 1, "RS3": 1, "RS4": 1}
-        rs_weighted = (
-            (weights["RS1"] * rs_data.get("RS1", 0)) +
-            (weights["RS2"] * rs_data.get("RS2", 0)) +
-            (weights["RS3"] * rs_data.get("RS3", 0)) +
-            (weights["RS4"] * rs_data.get("RS4", 0))
-        )
-
-        logging.info(f"{ticker} RS weighted score: {rs_weighted}")
-        return {"ticker": ticker, "rs_weighted": rs_weighted}
-
-    except Exception as e:
-        logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
-
-def normalize_scores(scores):
-    """
-    Normalize RS weighted scores into a 1-99 range.
-    """
-    min_score = min(scores, key=lambda x: x['rs_weighted'])['rs_weighted']
-    max_score = max(scores, key=lambda x: x['rs_weighted'])['rs_weighted']
-
-    for score in scores:
-        rs_weighted = score['rs_weighted']
-        normalized_score = ((rs_weighted - min_score) / (max_score - min_score)) * 98 + 1
-        score['rs_score'] = round(normalized_score)
-
-    return scores
-
-def calculate_rank_for_all_stocks():
-    """
-    Calculate RS scores for all stocks and rank them based on weighted RS scores.
-    """
-    try:
-        # Get all distinct tickers
-        tickers = ohlcv_collection.distinct("ticker")
-        total_tickers = len(tickers)
-        logging.info(f"Total number of tickers: {total_tickers}")
-
-        # Calculate weighted RS scores for all tickers
-        scores = []
-        for ticker in tickers:
-            result = calculate_weighted_rs_score(ticker)
-            if result:
-                scores.append(result)
-
-        # Normalize the scores to a 1-99 range
-        scores_normalized = normalize_scores(scores)
-
-        # Sort stocks by normalized RS score in descending order
-        scores_sorted = sorted(scores_normalized, key=lambda x: x["rs_score"], reverse=True)
-
-        # Rank the stocks and update the rank and RS score in the indicators collection
-        bulk_operations = []
-        for rank, stock in enumerate(scores_sorted, start=1):
-            ticker = stock['ticker']
-            rs_score = stock['rs_score']
-
-            bulk_operations.append(UpdateOne(
+class RSScoreCalculator:
+    def __init__(self, mongodb_uri="mongodb://mongodb-9iyq:27017", db_name='StockData'):
+        """Initialize the RS Score Calculator with MongoDB connection."""
+        self.client = MongoClient(mongodb_uri)
+        self.db = self.client[db_name]
+        self.ohlcv_collection = self.db['ohlcv_data']
+        self.indicators_collection = self.db['indicators']
+        
+    def calculate_weighted_rs_score(self, ticker):
+        """
+        Calculate weighted RS score for a stock using multiple timeframes.
+        Returns only the weighted score.
+        """
+        try:
+            # Get the latest date with RS values
+            latest_date = self.ohlcv_collection.find_one(
+                {"ticker": ticker, "$or": [
+                    {"RS4": {"$exists": True, "$ne": None}},
+                    {"RS3": {"$exists": True, "$ne": None}},
+                    {"RS2": {"$exists": True, "$ne": None}},
+                    {"RS1": {"$exists": True, "$ne": None}},
+                ]},
+                sort=[("date", -1)],
+                projection={"date": 1}
+            )
+            
+            if not latest_date:
+                logging.warning(f"No RS values found for {ticker}")
+                return None
+                
+            latest_date = latest_date["date"]
+            
+            # Fetch RS values
+            rs_data = self.ohlcv_collection.find_one(
                 {"ticker": ticker, "date": latest_date},
-                {"$set": {"rs_score": rs_score, "rank": rank}},
-                upsert=True
-            ))
+                {"RS1": 1, "RS2": 1, "RS3": 1, "RS4": 1}
+            )
+            
+            if not rs_data:
+                logging.warning(f"No RS data for {ticker} on {latest_date}")
+                return None
+            
+            # Define weights for different timeframes
+            weights = {
+                "RS1": 0.40,  # 40% weight for 3-month RS
+                "RS2": 0.30,  # 30% weight for 6-month RS
+                "RS3": 0.20,  # 20% weight for 9-month RS
+                "RS4": 0.10   # 10% weight for 12-month RS
+            }
+            
+            # Calculate weighted score
+            weighted_score = sum(
+                weights[f"RS{i}"] * rs_data.get(f"RS{i}", 0)
+                for i in range(1, 5)
+            )
+            
+            return {
+                "ticker": ticker,
+                "date": latest_date,
+                "weighted_score": weighted_score
+            }
+            
+        except Exception as e:
+            logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
+            return None
 
-            logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {rs_score}")
+    def normalize_scores(self, scores):
+        """
+        Normalize RS scores to a 1-99 range using percentile ranking.
+        This ensures an even distribution across the range.
+        """
+        if not scores:
+            return []
+            
+        # Extract weighted scores
+        weighted_scores = [s['weighted_score'] for s in scores]
+        
+        # Calculate percentile ranks (0 to 1)
+        percentile_ranks = pd.Series(weighted_scores).rank(pct=True)
+        
+        # Convert to 1-99 range
+        normalized_scores = (percentile_ranks * 98 + 1).round().astype(int)
+        
+        # Update scores with normalized values
+        for score, normalized in zip(scores, normalized_scores):
+            score['rs_score'] = normalized
+            
+        return scores
 
-        # Perform the bulk write
+    def update_database(self, scores):
+        """Update the database with new RS scores and ranks."""
+        if not scores:
+            return
+            
+        # Sort by RS score in descending order
+        scores_sorted = sorted(scores, key=lambda x: x['rs_score'], reverse=True)
+        
+        # Prepare bulk operations
+        bulk_operations = []
+        for rank, score in enumerate(scores_sorted, 1):
+            bulk_operations.append(
+                UpdateOne(
+                    {
+                        "ticker": score['ticker'],
+                        "date": score['date']
+                    },
+                    {
+                        "$set": {
+                            "rs_score": score['rs_score'],
+                            "rs_rank": rank
+                        }
+                    },
+                    upsert=True
+                )
+            )
+        
+        # Execute bulk update
         if bulk_operations:
-            indicators_collection.bulk_write(bulk_operations, ordered=False)
+            result = self.indicators_collection.bulk_write(bulk_operations, ordered=False)
+            logging.info(f"Updated {result.modified_count} documents")
 
-        logging.info("RS ranking and score calculation completed successfully.")
-
-    except Exception as e:
-        logging.error(f"Error during RS ranking and score calculation: {str(e)}")
+    def calculate_all_scores(self):
+        """Calculate and update RS scores for all stocks."""
+        try:
+            # Get all tickers
+            tickers = self.ohlcv_collection.distinct("ticker")
+            logging.info(f"Processing {len(tickers)} tickers")
+            
+            # Calculate weighted scores
+            scores = []
+            for ticker in tickers:
+                result = self.calculate_weighted_rs_score(ticker)
+                if result:
+                    scores.append(result)
+            
+            # Normalize scores
+            scores_normalized = self.normalize_scores(scores)
+            
+            # Update database
+            self.update_database(scores_normalized)
+            
+            logging.info("RS score calculation completed successfully")
+            
+        except Exception as e:
+            logging.error(f"Error in calculate_all_scores: {str(e)}")
 
 if __name__ == "__main__":
-    calculate_rank_for_all_stocks()
+    calculator = RSScoreCalculator()
+    calculator.calculate_all_scores()
