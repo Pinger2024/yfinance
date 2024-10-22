@@ -18,6 +18,24 @@ client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 
+def get_trading_days(df, current_date, days_back):
+    """
+    Get the correct historical date by counting actual trading days backwards.
+    """
+    # Ensure df is sorted by date in ascending order
+    df = df.sort_values('date')
+    
+    # Find the index of the current date
+    current_idx = df[df['date'] <= current_date].index[-1]
+    
+    # Count back the specified number of trading days
+    historical_idx = current_idx - days_back
+    
+    if historical_idx < 0:
+        raise ValueError(f"Not enough trading days in dataset to go back {days_back} days")
+        
+    return df.iloc[historical_idx]['date'], df.iloc[historical_idx]['close']
+
 def debug_tsla_calculations():
     logging.info("\n=== TSLA Calculation Debug ===")
     
@@ -25,11 +43,14 @@ def debug_tsla_calculations():
     history = list(ohlcv_collection.find(
         {"ticker": "TSLA"},
         {"date": 1, "close": 1}
-    ).sort("date", -1).limit(252))
+    ).sort("date", -1))
     
     # Convert to DataFrame for easier manipulation
     df = pd.DataFrame(history)
     df = df.sort_values('date')  # Sort chronologically
+    
+    # Get the most recent trading day
+    latest_date = df['date'].max()
     
     # Print all dates and closes for verification
     logging.info("\nAll dates and closes for TSLA (last 10 days):")
@@ -37,58 +58,49 @@ def debug_tsla_calculations():
         logging.info(f"Date: {row['date'].strftime('%Y-%m-%d')}, Close: {row['close']}")
     
     # Daily Percentage Change Calculation
-    latest_close = df['close'].iloc[-1]
-    previous_close = df['close'].iloc[-2]
+    latest_close = df[df['date'] == latest_date]['close'].iloc[0]
+    previous_date = df[df['date'] < latest_date]['date'].max()
+    previous_close = df[df['date'] == previous_date]['close'].iloc[0]
     daily_pct_change = (latest_close - previous_close) / previous_close * 100
     
     logging.info("\nDaily Percentage Change Calculation:")
-    logging.info(f"Latest date: {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
+    logging.info(f"Latest date: {latest_date.strftime('%Y-%m-%d')}")
     logging.info(f"Latest close: {latest_close}")
-    logging.info(f"Previous date: {df['date'].iloc[-2].strftime('%Y-%m-%d')}")
+    logging.info(f"Previous date: {previous_date.strftime('%Y-%m-%d')}")
     logging.info(f"Previous close: {previous_close}")
     logging.info(f"Calculated daily_pct_change: {daily_pct_change:.4f}%")
     
-    # RS4 Calculation
-    current_close = df['close'].iloc[-1]
-    historical_close = df['close'].iloc[-252]  # 252 trading days ago
-    rs4 = (current_close - historical_close) / historical_close * 100
-    
-    logging.info("\nRS4 Calculation:")
-    logging.info(f"Current date: {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
-    logging.info(f"Current close: {current_close}")
-    logging.info(f"Historical date (252 days ago): {df['date'].iloc[-252].strftime('%Y-%m-%d')}")
-    logging.info(f"Historical close: {historical_close}")
-    logging.info(f"Calculated RS4: {rs4:.4f}%")
-    
-    # Other RS Calculations
+    # RS Calculations
     periods = {
-        "RS1": 63,
-        "RS2": 126,
-        "RS3": 189,
+        "RS1": 63,   # ~3 months
+        "RS2": 126,  # ~6 months
+        "RS3": 189,  # ~9 months
+        "RS4": 252   # ~12 months
     }
     
+    rs_values = {}
+    
     for rs_key, period in periods.items():
-        current_close = df['close'].iloc[-1]
-        historical_close = df['close'].iloc[-period]
-        rs_value = (current_close - historical_close) / historical_close * 100
+        historical_date, historical_close = get_trading_days(df, latest_date, period)
+        rs_value = (latest_close - historical_close) / historical_close * 100
+        rs_values[rs_key] = rs_value
         
         logging.info(f"\n{rs_key} Calculation:")
-        logging.info(f"Current date: {df['date'].iloc[-1].strftime('%Y-%m-%d')}")
-        logging.info(f"Current close: {current_close}")
-        logging.info(f"Historical date ({period} days ago): {df['date'].iloc[-period].strftime('%Y-%m-%d')}")
+        logging.info(f"Current date: {latest_date.strftime('%Y-%m-%d')}")
+        logging.info(f"Current close: {latest_close}")
+        logging.info(f"Historical date ({period} trading days ago): {historical_date.strftime('%Y-%m-%d')}")
         logging.info(f"Historical close: {historical_close}")
         logging.info(f"Calculated {rs_key}: {rs_value:.4f}%")
 
     # Update database with corrected values
-    latest_date = df['date'].iloc[-1]
     update_result = ohlcv_collection.update_one(
         {"ticker": "TSLA", "date": latest_date},
         {"$set": {
             "daily_pct_change": daily_pct_change,
-            "RS1": (df['close'].iloc[-1] - df['close'].iloc[-63]) / df['close'].iloc[-63] * 100,
-            "RS2": (df['close'].iloc[-1] - df['close'].iloc[-126]) / df['close'].iloc[-126] * 100,
-            "RS3": (df['close'].iloc[-1] - df['close'].iloc[-189]) / df['close'].iloc[-189] * 100,
-            "RS4": rs4
+            "RS1": rs_values["RS1"],
+            "RS2": rs_values["RS2"],
+            "RS3": rs_values["RS3"],
+            "RS4": rs_values["RS4"]
         }},
         upsert=True
     )
