@@ -1,5 +1,5 @@
 import pandas as pd
-from pymongo import MongoClient, UpdateOne
+from pymongo import MongoClient
 import logging
 from datetime import datetime
 
@@ -15,92 +15,78 @@ db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
 
-def calculate_rs_score_for_all_stocks():
+# Function to calculate RS score using weighted method
+def calculate_rs_scores(ticker):
     """
-    Calculate RS scores for all stocks and store rank and RS score in the 'indicators' collection.
+    Calculate and store the RS scores for the given ticker based on weighted recent performance.
     """
     try:
-        # Find the latest date with RS values
-        latest_date = ohlcv_collection.find_one(
-            {"$or": [
-                {"RS4": {"$exists": True, "$ne": None}},
-                {"RS3": {"$exists": True, "$ne": None}},
-                {"RS2": {"$exists": True, "$ne": None}},
-                {"RS1": {"$exists": True, "$ne": None}},
-            ]},
-            sort=[("date", -1)],
-            projection={"date": 1}
+        # Fetch the last 252 trading days' data for the ticker
+        history = list(ohlcv_collection.find(
+            {"ticker": ticker},
+            {"date": 1, "close": 1, "_id": 0}
+        ).sort("date", -1).limit(252))
+
+        if len(history) < 252:
+            logging.warning(f"Not enough data to calculate RS for {ticker}")
+            return
+
+        df = pd.DataFrame(history).sort_values('date')
+
+        # Lengths for RS periods (e.g., ~3 months, ~6 months, etc.)
+        n63 = min(63, len(df))
+        n126 = min(126, len(df))
+        n189 = min(189, len(df))
+        n252 = min(252, len(df))
+
+        # Calculate RS1, RS2, RS3, RS4 using the weighted formula
+        benchmark_close = ohlcv_collection.find_one(
+            {"ticker": "SPY", "date": df['date'].iloc[-1]},
+            {"close": 1}
+        )['close']  # Assuming "SPY" is the benchmark like the S&P 500
+
+        rs1 = ((df['close'].iloc[-1] / df['close'].iloc[-n63]) - (benchmark_close / df['close'].iloc[-n63])) * 100
+        rs2 = ((df['close'].iloc[-1] / df['close'].iloc[-n126]) - (benchmark_close / df['close'].iloc[-n126])) * 100
+        rs3 = ((df['close'].iloc[-1] / df['close'].iloc[-n189]) - (benchmark_close / df['close'].iloc[-n189])) * 100
+        rs4 = ((df['close'].iloc[-1] / df['close'].iloc[-n252]) - (benchmark_close / df['close'].iloc[-n252])) * 100
+
+        # Weights (giving more weight to RS1)
+        w1, w2, w3, w4 = 2, 1, 1, 1
+
+        # Raw RS score (weighted sum)
+        rs_raw = w1 * rs1 + w2 * rs2 + w3 * rs3 + w4 * rs4
+
+        # Max and Min scores for normalization
+        max_score = w1 + w2 + w3 + w4
+        min_score = -max_score
+
+        # Normalize RS score to the range of 1-99
+        rs_score = ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
+        rs_score = max(1, min(99, rs_score))
+
+        logging.info(f"{ticker} RS Score: {rs_score}")
+
+        # Store the RS score in the indicators collection
+        indicators_collection.update_one(
+            {"ticker": ticker, "date": df['date'].iloc[-1]},
+            {"$set": {"rs_score": rs_score}},
+            upsert=True
         )
 
-        if not latest_date:
-            logging.error("No records found with RS values")
-            return
-
-        latest_date = latest_date["date"]
-        logging.info(f"Latest trading date for RS values: {latest_date}")
-
-        # Get all stocks with RS values for the latest date
-        stocks = list(ohlcv_collection.find(
-            {"date": latest_date, "$or": [
-                {"RS4": {"$exists": True, "$ne": None}},
-                {"RS3": {"$exists": True, "$ne": None}},
-                {"RS2": {"$exists": True, "$ne": None}},
-                {"RS1": {"$exists": True, "$ne": None}},
-            ]},
-            {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
-        ))
-
-        if not stocks:
-            logging.error("No RS data found for any stocks on the latest date")
-            return
-
-        # Sort stocks by RS value (using fallbacks) in descending order
-        stocks.sort(key=lambda x: (
-            x.get('RS4') or 
-            x.get('RS3') or 
-            x.get('RS2') or 
-            x.get('RS1') or 
-            float('-inf')
-        ), reverse=True)
-
-        total_stocks = len(stocks)
-        logging.info(f"Processing {total_stocks} stocks for RS score calculation")
-
-        # Prepare bulk operations to store RS scores and ranks in the 'indicators' collection
-        bulk_operations = []
-
-        for rank, stock in enumerate(stocks, 1):
-            ticker = stock['ticker']
-            rs_value = stock.get("RS4") or stock.get("RS3") or stock.get("RS2") or stock.get("RS1")
-
-            # Calculate the RS score as a percentile rank (reverse ranking)
-            percentile_rank = ((total_stocks - rank) / total_stocks) * 100
-            rs_score = max(1, min(99, round(percentile_rank)))
-
-            logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {rs_score}")
-
-            # Prepare the update document for bulk operation, including rank
-            bulk_operations.append(UpdateOne(
-                {"ticker": ticker, "date": latest_date},
-                {"$set": {"rs_score": rs_score, "rank": rank}},
-                upsert=True
-            ))
-
-        # Execute bulk update if there are operations
-        if bulk_operations:
-            indicators_collection.bulk_write(bulk_operations, ordered=False)
-            logging.info(f"RS score and rank calculations completed and stored for {total_stocks} stocks")
-
     except Exception as e:
-        logging.error(f"Error calculating RS scores: {str(e)}")
+        logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
 
+# Run the RS calculation for all tickers
 def main():
-    logging.info("Starting RS score and rank calculation for all stocks...")
-    
-    # Run RS score calculation for all stocks
-    calculate_rs_score_for_all_stocks()
-    
-    logging.info("RS score and rank calculation for all stocks complete.")
+    tickers = ohlcv_collection.distinct("ticker")
+    total_tickers = len(tickers)
+
+    logging.info(f"Starting RS score calculation for {total_tickers} tickers")
+
+    for ticker in tickers:
+        calculate_rs_scores(ticker)
+
+    logging.info("RS score calculation completed")
 
 if __name__ == "__main__":
     main()
