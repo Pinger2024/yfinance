@@ -20,16 +20,6 @@ client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 
-def get_trading_days(df, current_date, days_back):
-    df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
-    current_idx = df[df['date'] <= current_date].index[-1]
-    historical_idx = current_idx - days_back
-    
-    if historical_idx < 0:
-        raise ValueError(f"Not enough trading days")
-        
-    return df.iloc[historical_idx]['date'], df.iloc[historical_idx]['close']
-
 def calculate_rs_scores(ticker):
     try:
         # Get all historical data for the ticker
@@ -42,43 +32,46 @@ def calculate_rs_scores(ticker):
             return f"No data found for {ticker}"
 
         df = pd.DataFrame(history)
-        df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+        df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
 
+        # Compute daily_pct_change
+        df['daily_pct_change'] = df['close'].pct_change() * 100
+
+        periods = {
+            "RS1": 63,
+            "RS2": 126,
+            "RS3": 189,
+            "RS4": 252
+        }
+
+        # Compute RS values using shifted close prices
+        for rs_key, period in periods.items():
+            df[f'close_shift_{period}'] = df['close'].shift(period)
+            df[rs_key] = (df['close'] - df[f'close_shift_{period}']) / df[f'close_shift_{period}'] * 100
+
+        # Drop rows where 'daily_pct_change' is NaN (first row)
+        df = df.dropna(subset=['daily_pct_change']).reset_index(drop=True)
+
+        # Prepare bulk operations
         bulk_operations = []
         batch_size = 100  # Control the size of batches to avoid memory issues
-        
-        for i in range(1, len(df)):
-            current_row = df.iloc[i]
-            previous_row = df.iloc[i-1]
-            current_date = current_row['date']
 
-            daily_pct_change = (current_row['close'] - previous_row['close']) / previous_row['close'] * 100
-
+        for idx, row in df.iterrows():
+            current_date = row['date']
             update_doc = {
-                "daily_pct_change": daily_pct_change
+                "daily_pct_change": row['daily_pct_change']
             }
 
-            periods = {
-                "RS1": 63,
-                "RS2": 126,
-                "RS3": 189,
-                "RS4": 252
-            }
-
-            for rs_key, period in periods.items():
-                try:
-                    historical_date, historical_close = get_trading_days(df, current_date, period)
-                    rs_value = (current_row['close'] - historical_close) / historical_close * 100
-                    update_doc[rs_key] = rs_value
-                except ValueError:
-                    continue
+            for rs_key in periods.keys():
+                if pd.notnull(row[rs_key]):
+                    update_doc[rs_key] = row[rs_key]
 
             bulk_operations.append(UpdateOne(
                 {"ticker": ticker, "date": current_date},
                 {"$set": update_doc}
             ))
 
-            # Perform batch updates to avoid memory overload
+            # Perform batch updates
             if len(bulk_operations) >= batch_size:
                 ohlcv_collection.bulk_write(bulk_operations, ordered=False)
                 bulk_operations.clear()
@@ -96,10 +89,10 @@ def main():
 
     logging.info(f"Starting bulk update for {total_tickers} tickers")
 
-    # Use ThreadPoolExecutor with fewer workers to avoid resource exhaustion
-    with ThreadPoolExecutor(max_workers=3) as executor:  # Adjust workers based on resources
+    # Use ThreadPoolExecutor with appropriate number of workers
+    with ThreadPoolExecutor(max_workers=5) as executor:  # Adjust workers based on resources
         futures = {executor.submit(calculate_rs_scores, ticker): ticker for ticker in tickers}
-        
+
         for future in tqdm(as_completed(futures), total=total_tickers, desc="Processing tickers"):
             result = future.result()
             ticker = futures[future]
