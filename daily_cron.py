@@ -1,8 +1,6 @@
 import yfinance as yf
 from pymongo import MongoClient, UpdateOne
 import pandas as pd
-import numpy as np
-from datetime import datetime, timedelta
 import logging
 
 # Setup logging
@@ -58,113 +56,97 @@ def calculate_rs_values():
     }
 
     for ticker in tickers:
-        # Fetch the most recent trading day data
-        history = list(ohlcv_collection.find(
-            {"ticker": ticker},
-            {"date": 1, "close": 1, "_id": 0}
-        ))
-
-        if not history:
-            logging.warning(f"No data found for {ticker}")
+        history = list(ohlcv_collection.find({"ticker": ticker}).sort("date", -1).limit(252))
+        if len(history) < 252:
+            logging.warning(f"Not enough data to calculate RS for ticker {ticker}")
             continue
 
-        df = pd.DataFrame(history)
-        df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
+        history_df = pd.DataFrame(history)
+        history_df['daily_pct_change'] = history_df['close'].pct_change() * 100
 
-        # Compute daily_pct_change
-        df['daily_pct_change'] = df['close'].pct_change() * 100
-
-        # Compute RS values using shifted close prices
+        updates = {}
         for rs_key, period in periods.items():
-            df[f'close_shift_{period}'] = df['close'].shift(period)
-            df[rs_key] = (df['close'] - df[f'close_shift_{period}']) / df[f'close_shift_{period}'] * 100
+            if len(history_df) >= period:
+                rolling_return = (history_df['close'].iloc[0] - history_df['close'].iloc[period]) / history_df['close'].iloc[period] * 100
+                updates[rs_key] = rolling_return
 
-        # Drop rows where 'daily_pct_change' is NaN (first row)
-        df = df.dropna(subset=['daily_pct_change']).reset_index(drop=True)
+        updates["daily_pct_change"] = history_df['daily_pct_change'].iloc[0]
 
-        # Prepare bulk operations for updating
-        bulk_operations = []
-        current_row = df.iloc[-1]  # Only update the latest trading day data
-        update_doc = {
-            "daily_pct_change": current_row['daily_pct_change']
-        }
-
-        for rs_key in periods.keys():
-            if pd.notnull(current_row[rs_key]):
-                update_doc[rs_key] = current_row[rs_key]
-
-        bulk_operations.append(UpdateOne(
-            {"ticker": ticker, "date": current_row['date']},
-            {"$set": update_doc},
-            upsert=True
-        ))
-
-        # Perform the update
-        if bulk_operations:
-            ohlcv_collection.bulk_write(bulk_operations, ordered=False)
-            logging.info(f"RS values updated for {ticker} on {current_row['date']}")
+        if updates:
+            ohlcv_collection.update_one(
+                {"ticker": ticker, "date": history_df['date'].iloc[0]},
+                {"$set": updates},
+                upsert=True
+            )
     
     logging.info("RS values and daily percentage change calculated.")
 
-# Function to calculate and rank RS score using RS4, RS3, RS2, RS1 as fallbacks
-def calculate_rs_ranking():
-    latest_date = ohlcv_collection.find_one(
-        {"$or": [
-            {"RS4": {"$exists": True, "$ne": None}},
-            {"RS3": {"$exists": True, "$ne": None}},
-            {"RS2": {"$exists": True, "$ne": None}},
-            {"RS1": {"$exists": True, "$ne": None}},
-        ]},
-        sort=[("date", -1)],
-        projection={"date": 1}
-    )["date"]
+# Function to calculate weighted RS score for a stock
+def calculate_weighted_rs_score(ticker):
+    try:
+        latest_date = ohlcv_collection.find_one(
+            {"ticker": ticker, "$or": [
+                {"RS4": {"$exists": True, "$ne": None}},
+                {"RS3": {"$exists": True, "$ne": None}},
+                {"RS2": {"$exists": True, "$ne": None}},
+                {"RS1": {"$exists": True, "$ne": None}},
+            ]},
+            sort=[("date", -1)],
+            projection={"date": 1}
+        )["date"]
 
-    logging.info(f"Latest trading date for RS values: {latest_date}")
-
-    stocks = list(ohlcv_collection.find(
-        {"date": latest_date, "$or": [
-            {"RS4": {"$exists": True, "$ne": None}},
-            {"RS3": {"$exists": True, "$ne": None}},
-            {"RS2": {"$exists": True, "$ne": None}},
-            {"RS1": {"$exists": True, "$ne": None}},
-        ]},
-        {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
-    ))
-
-    stocks.sort(key=lambda x: (
-        x.get('RS4') or 
-        x.get('RS3') or 
-        x.get('RS2') or 
-        x.get('RS1') or 
-        float('-inf')
-    ))
-
-    total_stocks = len(stocks)
-    if total_stocks == 0:
-        logging.error("No stocks found with RS values")
-        return
-
-    # Calculate and update RS scores
-    bulk_operations = []
-    for rank, doc in enumerate(stocks, 1):
-        ticker = doc['ticker']
-        percentile_rank = (rank / total_stocks) * 100
-        rs_score = max(1, min(99, round(percentile_rank)))
-
-        bulk_operations.append(UpdateOne(
+        rs_data = ohlcv_collection.find_one(
             {"ticker": ticker, "date": latest_date},
-            {"$set": {"rs_score": rs_score}},
+            {"RS1": 1, "RS2": 1, "RS3": 1, "RS4": 1}
+        )
+
+        weights = {
+            "RS1": 0.40,
+            "RS2": 0.30,
+            "RS3": 0.20,
+            "RS4": 0.10
+        }
+
+        weighted_score = sum(
+            weights[f"RS{i}"] * rs_data.get(f"RS{i}", 0)
+            for i in range(1, 5)
+        )
+
+        return {
+            "ticker": ticker,
+            "date": latest_date,
+            "weighted_score": weighted_score
+        }
+
+    except Exception as e:
+        logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
+        return None
+
+# Normalize and update RS scores in the indicators collection
+def normalize_and_update_rs_scores():
+    scores = []
+    for ticker in tickers:
+        score = calculate_weighted_rs_score(ticker)
+        if score:
+            scores.append(score)
+
+    scores_df = pd.DataFrame(scores)
+    scores_df["rank"] = scores_df["weighted_score"].rank(pct=True)
+    scores_df["rs_score"] = (scores_df["rank"] * 98 + 1).round().astype(int)
+
+    bulk_operations = []
+    for _, row in scores_df.iterrows():
+        bulk_operations.append(UpdateOne(
+            {"ticker": row["ticker"], "date": row["date"]},
+            {"$set": {"rs_score": row["rs_score"]}},
             upsert=True
         ))
 
-        logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {rs_score}")
-
     if bulk_operations:
         indicators_collection.bulk_write(bulk_operations, ordered=False)
+        logging.info(f"Updated {len(bulk_operations)} RS scores")
 
-    logging.info("RS ranking and score calculation completed.")
-
-# Run the daily cron job
+# Main function to run the daily cron job
 def run_daily_cron_job():
     logging.info("Starting daily cron job...")
 
@@ -175,7 +157,7 @@ def run_daily_cron_job():
     calculate_rs_values()
 
     # Step 3: Calculate RS scores for all tickers
-    calculate_rs_ranking()
+    normalize_and_update_rs_scores()
 
     logging.info("Daily cron job completed.")
 
