@@ -17,20 +17,17 @@ indicators_collection = db['indicators']
 # List of tickers to process
 tickers = ohlcv_collection.distinct('ticker')
 
-# Fetch and update daily OHLCV data
+# Function to fetch and update daily OHLCV data
 def fetch_daily_ohlcv_data():
     for ticker in tickers:
         stock = yf.Ticker(ticker)
-        today_data = stock.history(period="1d")  # Fetch today's data only
+        today_data = stock.history(period="5d")  # Fetch the last 5 days of data
 
         if not today_data.empty:
             date = today_data.index[-1].to_pydatetime()
             row = today_data.iloc[-1]
 
-            # Check if a record already exists for this ticker and date
-            existing_record = ohlcv_collection.find_one({"ticker": ticker, "date": date})
-
-            # If a record exists, update it; otherwise, insert a new one
+            # Create the data document
             data = {
                 "ticker": ticker,
                 "date": date,
@@ -41,15 +38,14 @@ def fetch_daily_ohlcv_data():
                 "volume": row['Volume'],
             }
 
-            if existing_record:
-                logging.info(f"Updating existing record for {ticker} on {date}")
-                ohlcv_collection.update_one(
-                    {"_id": existing_record["_id"]},
-                    {"$set": data}
-                )
-            else:
-                logging.info(f"Inserting new record for {ticker} on {date}")
-                ohlcv_collection.insert_one(data)
+            # Use update_one with upsert=True to avoid duplicates
+            ohlcv_collection.update_one(
+                {"ticker": ticker, "date": date},
+                {"$set": data},
+                upsert=True
+            )
+            
+            logging.info(f"Upserted record for {ticker} on {date}")
     
     logging.info("Daily OHLCV data updated successfully.")
 
@@ -73,27 +69,28 @@ def calculate_rs_values():
         history_df['daily_pct_change'] = history_df['close'].pct_change() * 100
 
         # Calculate rolling returns for RS1, RS2, RS3, RS4
+        updates = {}
         for rs_key, period in periods.items():
             if len(history_df) >= period:
                 rolling_return = (history_df['close'].iloc[0] - history_df['close'].iloc[period]) / history_df['close'].iloc[period] * 100
-                ohlcv_collection.update_one(
-                    {"ticker": ticker, "date": history_df['date'].iloc[0]},
-                    {"$set": {rs_key: rolling_return}},
-                    upsert=True
-                )
+                updates[rs_key] = rolling_return
 
-        # Update daily percentage change
-        daily_pct_change = history_df['daily_pct_change'].iloc[0]
-        ohlcv_collection.update_one(
-            {"ticker": ticker, "date": history_df['date'].iloc[0]},
-            {"$set": {"daily_pct_change": daily_pct_change}},
-            upsert=True
-        )
+        # Add daily percentage change to updates
+        updates["daily_pct_change"] = history_df['daily_pct_change'].iloc[0]
+
+        # Update all RS values and daily percentage change in a single operation
+        if updates:
+            ohlcv_collection.update_one(
+                {"ticker": ticker, "date": history_df['date'].iloc[0]},
+                {"$set": updates},
+                upsert=True
+            )
     
     logging.info("RS values and daily percentage change calculated.")
 
 # Function to calculate and rank RS score using RS4, RS3, RS2, RS1 as fallbacks
 def calculate_rs_ranking():
+    # Find the latest date with RS values
     latest_date = ohlcv_collection.find_one(
         {"$or": [
             {"RS4": {"$exists": True, "$ne": None}},
@@ -103,11 +100,17 @@ def calculate_rs_ranking():
         ]},
         sort=[("date", -1)],
         projection={"date": 1}
-    )["date"]
-
+    )
+    
+    if not latest_date:
+        logging.error("No records found with RS values")
+        return
+        
+    latest_date = latest_date["date"]
     logging.info(f"Latest trading date for RS values: {latest_date}")
 
-    cursor = ohlcv_collection.find(
+    # Get all stocks with RS values for the latest date
+    stocks = list(ohlcv_collection.find(
         {"date": latest_date, "$or": [
             {"RS4": {"$exists": True, "$ne": None}},
             {"RS3": {"$exists": True, "$ne": None}},
@@ -115,38 +118,40 @@ def calculate_rs_ranking():
             {"RS1": {"$exists": True, "$ne": None}},
         ]},
         {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
-    ).sort("RS4", 1)
+    ))
 
-    total_stocks = cursor.count()
-    rank = 1
+    # Sort stocks by RS value (using fallbacks)
+    stocks.sort(key=lambda x: (
+        x.get('RS4') or 
+        x.get('RS3') or 
+        x.get('RS2') or 
+        x.get('RS1') or 
+        float('-inf')
+    ))
 
-    for doc in cursor:
+    total_stocks = len(stocks)
+    if total_stocks == 0:
+        logging.error("No stocks found with RS values")
+        return
+
+    # Calculate and update RS scores
+    bulk_operations = []
+    for rank, doc in enumerate(stocks, 1):
         ticker = doc['ticker']
-        rs_value = (
-            doc.get('RS4') or
-            doc.get('RS3') or
-            doc.get('RS2') or
-            doc.get('RS1')
-        )
-
-        if rs_value is None:
-            continue  # Skip if no RS value is found
-
-        # Calculate percentile rank (convert rank to 1-99 scale)
         percentile_rank = (rank / total_stocks) * 100
-        rs_score = max(1, min(99, round(percentile_rank)))  # Ensure it's between 1 and 99
+        rs_score = max(1, min(99, round(percentile_rank)))
 
-        # Log ticker rank info
-        logging.info(f"Ticker: {ticker}, RS value: {rs_value}, Rank: {rank}, RS Score: {rs_score}")
-
-        # Update the indicators collection with the new RS score
-        indicators_collection.update_one(
+        bulk_operations.append(UpdateOne(
             {"ticker": ticker, "date": latest_date},
             {"$set": {"rs_score": rs_score}},
             upsert=True
-        )
+        ))
 
-        rank += 1
+        logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {rs_score}")
+
+    # Execute bulk update
+    if bulk_operations:
+        indicators_collection.bulk_write(bulk_operations, ordered=False)
 
     logging.info("RS ranking and score calculation completed.")
 
