@@ -20,16 +20,18 @@ tickers = ohlcv_collection.distinct('ticker')
 
 # Function to fetch and update daily OHLCV data
 def fetch_daily_ohlcv_data():
-    batch_size = 100  # Adjust based on resources
+    batch_size = 50  # Adjust based on resources
     for batch_start in range(0, len(tickers), batch_size):
-        batch_tickers = tickers[batch_start:batch_start+batch_size]
+        batch_tickers = tickers[batch_start:batch_start + batch_size]
         try:
-            # Fetch the last 5 days of data for the batch
-            data = yf.download(batch_tickers, period="5d", group_by='ticker', threads=True)
+            # Fetch the last 1 month of data for the batch
+            data = yf.download(batch_tickers, period="1mo", group_by='ticker', threads=False)
             if data.empty:
                 continue
+
             # Prepare data for upsert
             bulk_operations = []
+
             if isinstance(data.columns, pd.MultiIndex):
                 # Data is multi-indexed
                 for ticker in batch_tickers:
@@ -63,9 +65,11 @@ def fetch_daily_ohlcv_data():
             else:
                 # Data is single-indexed (only one ticker)
                 for ticker in batch_tickers:
-                    if ticker != data.columns.levels[0][0]:
+                    if ticker not in data.columns:
+                        logging.warning(f"No data for {ticker}")
                         continue
                     ticker_data = data
+                    ticker_data = ticker_data.dropna(how='all')
                     if ticker_data.empty:
                         logging.warning(f"No data for {ticker}")
                         continue
@@ -103,7 +107,7 @@ def calculate_rs_values():
         "RS3": 189,
         "RS4": 252
     }
-    
+
     def process_ticker(ticker):
         try:
             # Fetch the last 252 + 1 days of data for the ticker
@@ -140,7 +144,7 @@ def calculate_rs_values():
             logging.info(f"RS values updated for {ticker} on {current_row['date']}")
         except Exception as e:
             logging.error(f"Error processing {ticker}: {e}")
-    
+
     # Use ThreadPoolExecutor to process tickers in parallel
     with ThreadPoolExecutor(max_workers=5) as executor:
         list(tqdm(executor.map(process_ticker, tickers), total=len(tickers), desc="Calculating RS values"))
@@ -201,7 +205,7 @@ def calculate_rs_ranking():
         bulk_operations.append(UpdateOne(
             {"ticker": ticker, "date": latest_date},
             {"$set": {"rs_score": rs_score}},
-                upsert=True
+            upsert=True
         ))
         logging.info(f"Ticker: {ticker}, RS Score: {rs_score}")
     # Perform bulk update
@@ -212,16 +216,16 @@ def calculate_rs_ranking():
 # Run the daily cron job
 def run_daily_cron_job():
     logging.info("Starting daily cron job...")
-    
+
     # Step 1: Fetch today's OHLCV data for all tickers
     fetch_daily_ohlcv_data()
-    
+
     # Step 2: Calculate RS values and daily percentage change
     calculate_rs_values()
-    
+
     # Step 3: Calculate RS scores for all tickers
     calculate_rs_ranking()
-    
+
     logging.info("Daily cron job completed.")
 
 if __name__ == "__main__":
