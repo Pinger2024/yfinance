@@ -1,8 +1,7 @@
 import pandas as pd
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 import logging
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Setup basic logging
 logging.basicConfig(
@@ -16,76 +15,97 @@ db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 indicators_collection = db['indicators']
 
-# Function to rank stocks based on weighted RS values
-def rank_and_assign_rs_scores():
+def calculate_weighted_rs_score(ticker):
+    """
+    Calculate and rank RS score for a stock using weighted RS values.
+    """
     try:
-        # Find the latest date with RS values from the OHLCV collection
+        # Retrieve the most recent trading day
         latest_date = ohlcv_collection.find_one(
-            {"RS4": {"$exists": True}},
+            {"ticker": ticker, "$or": [
+                {"RS4": {"$exists": True, "$ne": None}},
+                {"RS3": {"$exists": True, "$ne": None}},
+                {"RS2": {"$exists": True, "$ne": None}},
+                {"RS1": {"$exists": True, "$ne": None}},
+            ]},
             sort=[("date", -1)],
             projection={"date": 1}
         )
 
         if not latest_date:
-            logging.error("No records found with RS values in OHLCV")
+            logging.error(f"No records found with RS values for {ticker}")
             return
 
         latest_date = latest_date["date"]
         logging.info(f"Latest trading date for RS values: {latest_date}")
 
-        # Fetch all stocks with RS1, RS2, RS3, RS4 values for the latest date
-        stocks = list(ohlcv_collection.find(
-            {"date": latest_date, "RS4": {"$exists": True}},
-            {"ticker": 1, "RS1": 1, "RS2": 1, "RS3": 1, "RS4": 1}
-        ))
+        # Fetch RS values for the ticker
+        rs_data = ohlcv_collection.find_one(
+            {"ticker": ticker, "date": latest_date},
+            {"RS1": 1, "RS2": 1, "RS3": 1, "RS4": 1}
+        )
 
-        if not stocks:
-            logging.error(f"No RS values found for date: {latest_date}")
+        if not rs_data:
+            logging.error(f"No RS data found for {ticker} on {latest_date}")
             return
 
-        # Apply weighting to RS values (more weight to recent performance)
-        w1, w2, w3, w4 = 2, 1, 1, 1  # Weighting factors
-        for stock in stocks:
-            rs1, rs2, rs3, rs4 = stock.get('RS1'), stock.get('RS2'), stock.get('RS3'), stock.get('RS4')
+        # Apply the weights: RS1 gets more weight
+        weights = {"RS1": 2, "RS2": 1, "RS3": 1, "RS4": 1}
+        rs_weighted = (
+            (weights["RS1"] * rs_data.get("RS1", 0)) +
+            (weights["RS2"] * rs_data.get("RS2", 0)) +
+            (weights["RS3"] * rs_data.get("RS3", 0)) +
+            (weights["RS4"] * rs_data.get("RS4", 0))
+        )
 
-            # Calculate the weighted RS score
-            rs_raw = (w1 * rs1 + w2 * rs2 + w3 * rs3 + w4 * rs4) / (w1 + w2 + w3 + w4)
-            stock['rs_raw'] = rs_raw
+        logging.info(f"{ticker} RS weighted score: {rs_weighted}")
+        return {"ticker": ticker, "rs_weighted": rs_weighted}
 
-        # Rank stocks based on the weighted RS score
-        stocks.sort(key=lambda x: x['rs_raw'], reverse=True)
-
-        # Assign RS score based on rank
-        total_stocks = len(stocks)
-        bulk_operations = []
-        for rank, stock in enumerate(stocks, 1):
-            ticker = stock['ticker']
-            rs_score = max(1, min(99, round((rank / total_stocks) * 100)))
-
-            # Store RS score and rank in the indicators collection
-            bulk_operations.append(
-                {"update_one": {
-                    "filter": {"ticker": ticker, "date": latest_date},
-                    "update": {"$set": {"rs_score": rs_score, "rank": rank}},
-                    "upsert": True
-                }}
-            )
-
-            logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {rs_score}")
-
-        # Perform bulk write to store RS scores and ranks
-        if bulk_operations:
-            indicators_collection.bulk_write(bulk_operations)
-
-        logging.info("RS score calculation and ranking completed.")
-    
     except Exception as e:
-        logging.error(f"Error in ranking and assigning RS scores: {str(e)}")
+        logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
 
-# Main function to run the process
-def main():
-    # Rank and assign RS scores for all stocks based on the latest RS values
-    rank_and_assign_rs_scores()
+def calculate_rank_for_all_stocks():
+    """
+    Calculate RS scores for all stocks and rank them based on weighted RS scores.
+    """
+    try:
+        # Get all distinct tickers
+        tickers = ohlcv_collection.distinct("ticker")
+        total_tickers = len(tickers)
+        logging.info(f"Total number of tickers: {total_tickers}")
+
+        # Calculate weighted RS scores for all tickers
+        scores = []
+        for ticker in tickers:
+            result = calculate_weighted_rs_score(ticker)
+            if result:
+                scores.append(result)
+
+        # Sort stocks by weighted RS score in descending order
+        scores_sorted = sorted(scores, key=lambda x: x["rs_weighted"], reverse=True)
+
+        # Rank the stocks and update the rank and RS score in the indicators collection
+        bulk_operations = []
+        for rank, stock in enumerate(scores_sorted, start=1):
+            ticker = stock['ticker']
+            rs_score = (total_tickers - rank + 1) / total_tickers * 99
+
+            bulk_operations.append(UpdateOne(
+                {"ticker": ticker, "date": latest_date},
+                {"$set": {"rs_score": round(rs_score), "rank": rank}},
+                upsert=True
+            ))
+
+            logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {round(rs_score)}")
+
+        # Perform the bulk write
+        if bulk_operations:
+            indicators_collection.bulk_write(bulk_operations, ordered=False)
+
+        logging.info("RS ranking and score calculation completed successfully.")
+
+    except Exception as e:
+        logging.error(f"Error during RS ranking and score calculation: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    calculate_rank_for_all_stocks()
