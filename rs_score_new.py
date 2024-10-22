@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 import warnings
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -18,8 +19,6 @@ logging.basicConfig(
 client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
-
-BULK_LIMIT = 1000  # Define a limit for bulk writes
 
 def get_trading_days(df, current_date, days_back):
     """
@@ -92,16 +91,11 @@ def calculate_rs_scores(ticker):
                 {"$set": update_doc}
             ))
         
-            # Execute bulk operations in batches
-            if len(bulk_operations) >= BULK_LIMIT:
-                ohlcv_collection.bulk_write(bulk_operations, ordered=False)
-                bulk_operations = []
-        
-        # Execute remaining operations
+        # Execute bulk update if there are operations
         if bulk_operations:
             ohlcv_collection.bulk_write(bulk_operations, ordered=False)
             
-        return f"Successfully updated {ticker} - {len(df)} records"
+        return f"Successfully updated {ticker} - {len(bulk_operations)} records"
         
     except Exception as e:
         return f"Error processing {ticker}: {str(e)}"
@@ -113,15 +107,19 @@ def main():
     
     logging.info(f"Starting bulk update for {total_tickers} tickers")
     
-    # Process each ticker with progress bar
-    for ticker in tqdm(tickers, desc="Processing tickers"):
-        result = calculate_rs_scores(ticker)
-        if "Error" in result:
-            logging.error(result)
-        elif "No data" in result:
-            logging.warning(result)
-        else:
-            logging.info(result)
+    # Process each ticker with progress bar using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=5) as executor:  # Adjust max_workers as needed
+        futures = {executor.submit(calculate_rs_scores, ticker): ticker for ticker in tickers}
+        
+        for future in tqdm(as_completed(futures), total=total_tickers, desc="Processing tickers"):
+            result = future.result()
+            ticker = futures[future]
+            if "Error" in result:
+                logging.error(result)
+            elif "No data" in result:
+                logging.warning(result)
+            else:
+                logging.info(result)
     
     logging.info("Bulk update complete")
 
