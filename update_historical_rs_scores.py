@@ -83,8 +83,8 @@ def calculate_app_rs_score():
 
         logging.info(f"APP rank: {app_rank} out of {total_stocks} stocks")
 
-        # Calculate RS score (percentile)
-        percentile_rank = (app_rank / total_stocks) * 100
+        # Calculate RS score (percentile) -- adjust the logic to reverse the ranking
+        percentile_rank = ((total_stocks - app_rank) / total_stocks) * 100
         rs_score = max(1, min(99, round(percentile_rank)))
 
         logging.info(f"APP RS Score: {rs_score}")
