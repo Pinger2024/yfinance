@@ -2,3 +2,4 @@ yfinance
 pymongo
 pandas
 Flask
+tqdm

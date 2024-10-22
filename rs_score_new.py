@@ -1,13 +1,14 @@
 import pandas as pd
-from pymongo import MongoClient
+from pymongo import MongoClient, UpdateOne
 import logging
 from datetime import datetime
 import warnings
+from tqdm import tqdm
 
-# Suppress specific warnings
+# Suppress warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Setup detailed logging
+# Setup basic logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -18,129 +19,111 @@ client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
 
+BULK_LIMIT = 1000  # Define a limit for bulk writes
+
 def get_trading_days(df, current_date, days_back):
     """
     Get the correct historical date by counting actual trading days backwards.
     """
-    # Ensure df is sorted by date in ascending order and handle duplicates
     df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
-    
-    # Find the index of the current date
     current_idx = df[df['date'] <= current_date].index[-1]
-    
-    # Count back the specified number of trading days
     historical_idx = current_idx - days_back
     
     if historical_idx < 0:
-        raise ValueError(f"Not enough trading days in dataset to go back {days_back} days")
+        raise ValueError(f"Not enough trading days")
         
     return df.iloc[historical_idx]['date'], df.iloc[historical_idx]['close']
 
-def debug_tsla_calculations():
-    logging.info("\n=== TSLA Calculation Debug ===")
-    
-    # Get TSLA historical data - no limit on the find operation
-    history = list(ohlcv_collection.find(
-        {"ticker": "TSLA"},
-        {"date": 1, "close": 1, "_id": 0}
-    ))
-    
-    logging.info(f"Total number of records retrieved: {len(history)}")
-    
-    # Convert to DataFrame and handle duplicates
-    df = pd.DataFrame(history)
-    df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
-    
-    logging.info(f"Number of unique trading days: {len(df)}")
-    logging.info(f"Date range: {df['date'].min().strftime('%Y-%m-%d')} to {df['date'].max().strftime('%Y-%m-%d')}")
-    
-    # Get the most recent trading day
-    latest_date = df['date'].max()
-    
-    # Print all dates and closes for verification
-    logging.info("\nAll dates and closes for TSLA (last 10 days):")
-    for _, row in df.tail(10).iterrows():
-        logging.info(f"Date: {row['date'].strftime('%Y-%m-%d')}, Close: {row['close']}")
-    
-    # Daily Percentage Change Calculation
-    latest_close = df[df['date'] == latest_date]['close'].iloc[0]
-    previous_date = df[df['date'] < latest_date]['date'].max()
-    previous_close = df[df['date'] == previous_date]['close'].iloc[0]
-    daily_pct_change = (latest_close - previous_close) / previous_close * 100
-    
-    logging.info("\nDaily Percentage Change Calculation:")
-    logging.info(f"Latest date: {latest_date.strftime('%Y-%m-%d')}")
-    logging.info(f"Latest close: {latest_close}")
-    logging.info(f"Previous date: {previous_date.strftime('%Y-%m-%d')}")
-    logging.info(f"Previous close: {previous_close}")
-    logging.info(f"Calculated daily_pct_change: {daily_pct_change:.4f}%")
-    
-    # RS Calculations
-    periods = {
-        "RS1": 63,   # ~3 months
-        "RS2": 126,  # ~6 months
-        "RS3": 189,  # ~9 months
-        "RS4": 252   # ~12 months
-    }
-    
-    rs_values = {}
-    
-    for rs_key, period in periods.items():
-        try:
-            historical_date, historical_close = get_trading_days(df, latest_date, period)
-            rs_value = (latest_close - historical_close) / historical_close * 100
-            rs_values[rs_key] = rs_value
+def calculate_rs_scores(ticker):
+    """
+    Calculate RS scores for all dates for a given ticker.
+    """
+    try:
+        # Get all historical data for the ticker
+        history = list(ohlcv_collection.find(
+            {"ticker": ticker},
+            {"date": 1, "close": 1, "_id": 0}
+        ))
+        
+        if not history:
+            return f"No data found for {ticker}"
+
+        # Convert to DataFrame and prepare data
+        df = pd.DataFrame(history)
+        df = df.sort_values('date').drop_duplicates(subset=['date'], keep='last')
+        
+        # Prepare bulk updates
+        bulk_operations = []
+        
+        # Calculate values for each date
+        for i in range(1, len(df)):
+            current_row = df.iloc[i]
+            previous_row = df.iloc[i-1]
+            current_date = current_row['date']
             
-            logging.info(f"\n{rs_key} Calculation:")
-            logging.info(f"Current date: {latest_date.strftime('%Y-%m-%d')}")
-            logging.info(f"Current close: {latest_close}")
-            logging.info(f"Historical date ({period} trading days ago): {historical_date.strftime('%Y-%m-%d')}")
-            logging.info(f"Historical close: {historical_close}")
-            logging.info(f"Calculated {rs_key}: {rs_value:.4f}%")
-        except ValueError as e:
-            logging.error(f"Error calculating {rs_key}: {str(e)}")
-            rs_values[rs_key] = None
-
-    # Update database with corrected values
-    update_doc = {
-        "daily_pct_change": daily_pct_change
-    }
-    
-    # Only include RS values that were successfully calculated
-    for key, value in rs_values.items():
-        if value is not None:
-            update_doc[key] = value
-
-    update_result = ohlcv_collection.update_one(
-        {"ticker": "TSLA", "date": latest_date},
-        {"$set": update_doc},
-        upsert=True
-    )
-    
-    logging.info("\nDatabase Update Result:")
-    logging.info(f"Matched: {update_result.matched_count}")
-    logging.info(f"Modified: {update_result.modified_count}")
-    
-    # Verify the update
-    updated_doc = ohlcv_collection.find_one(
-        {"ticker": "TSLA", "date": latest_date},
-        {"date": 1, "RS1": 1, "RS2": 1, "RS3": 1, "RS4": 1, "daily_pct_change": 1, "_id": 0}
-    )
-    
-    logging.info("\nUpdated Values in Database:")
-    logging.info(f"Date: {updated_doc['date'].strftime('%Y-%m-%d')}")
-    logging.info(f"Daily %Change: {updated_doc.get('daily_pct_change', 'Not found')}")
-    for rs_key in ["RS1", "RS2", "RS3", "RS4"]:
-        logging.info(f"{rs_key}: {updated_doc.get(rs_key, 'Not found')}")
+            # Calculate daily percentage change
+            daily_pct_change = (current_row['close'] - previous_row['close']) / previous_row['close'] * 100
+            
+            # Initialize update document
+            update_doc = {
+                "daily_pct_change": daily_pct_change
+            }
+            
+            # Calculate RS values for different periods
+            periods = {
+                "RS1": 63,   # ~3 months
+                "RS2": 126,  # ~6 months
+                "RS3": 189,  # ~9 months
+                "RS4": 252   # ~12 months
+            }
+            
+            for rs_key, period in periods.items():
+                try:
+                    historical_date, historical_close = get_trading_days(df, current_date, period)
+                    rs_value = (current_row['close'] - historical_close) / historical_close * 100
+                    update_doc[rs_key] = rs_value
+                except ValueError:
+                    # Skip RS calculation if not enough historical data
+                    continue
+            
+            # Add update operation to bulk operations list
+            bulk_operations.append(UpdateOne(
+                {"ticker": ticker, "date": current_date},
+                {"$set": update_doc}
+            ))
+        
+            # Execute bulk operations in batches
+            if len(bulk_operations) >= BULK_LIMIT:
+                ohlcv_collection.bulk_write(bulk_operations, ordered=False)
+                bulk_operations = []
+        
+        # Execute remaining operations
+        if bulk_operations:
+            ohlcv_collection.bulk_write(bulk_operations, ordered=False)
+            
+        return f"Successfully updated {ticker} - {len(df)} records"
+        
+    except Exception as e:
+        return f"Error processing {ticker}: {str(e)}"
 
 def main():
-    logging.info("Starting TSLA debug script")
-    try:
-        debug_tsla_calculations()
-        logging.info("Debug complete")
-    except Exception as e:
-        logging.error(f"Error in main execution: {str(e)}")
-        raise
+    # Get unique tickers
+    tickers = ohlcv_collection.distinct("ticker")
+    total_tickers = len(tickers)
+    
+    logging.info(f"Starting bulk update for {total_tickers} tickers")
+    
+    # Process each ticker with progress bar
+    for ticker in tqdm(tickers, desc="Processing tickers"):
+        result = calculate_rs_scores(ticker)
+        if "Error" in result:
+            logging.error(result)
+        elif "No data" in result:
+            logging.warning(result)
+        else:
+            logging.info(result)
+    
+    logging.info("Bulk update complete")
 
 if __name__ == "__main__":
     main()
