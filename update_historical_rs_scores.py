@@ -64,6 +64,20 @@ def calculate_weighted_rs_score(ticker):
     except Exception as e:
         logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
 
+def normalize_scores(scores):
+    """
+    Normalize RS weighted scores into a 1-99 range.
+    """
+    min_score = min(scores, key=lambda x: x['rs_weighted'])['rs_weighted']
+    max_score = max(scores, key=lambda x: x['rs_weighted'])['rs_weighted']
+
+    for score in scores:
+        rs_weighted = score['rs_weighted']
+        normalized_score = ((rs_weighted - min_score) / (max_score - min_score)) * 98 + 1
+        score['rs_score'] = round(normalized_score)
+
+    return scores
+
 def calculate_rank_for_all_stocks():
     """
     Calculate RS scores for all stocks and rank them based on weighted RS scores.
@@ -81,22 +95,25 @@ def calculate_rank_for_all_stocks():
             if result:
                 scores.append(result)
 
-        # Sort stocks by weighted RS score in descending order
-        scores_sorted = sorted(scores, key=lambda x: x["rs_weighted"], reverse=True)
+        # Normalize the scores to a 1-99 range
+        scores_normalized = normalize_scores(scores)
+
+        # Sort stocks by normalized RS score in descending order
+        scores_sorted = sorted(scores_normalized, key=lambda x: x["rs_score"], reverse=True)
 
         # Rank the stocks and update the rank and RS score in the indicators collection
         bulk_operations = []
         for rank, stock in enumerate(scores_sorted, start=1):
             ticker = stock['ticker']
-            rs_score = (total_tickers - rank + 1) / total_tickers * 99
+            rs_score = stock['rs_score']
 
             bulk_operations.append(UpdateOne(
                 {"ticker": ticker, "date": latest_date},
-                {"$set": {"rs_score": round(rs_score), "rank": rank}},
+                {"$set": {"rs_score": rs_score, "rank": rank}},
                 upsert=True
             ))
 
-            logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {round(rs_score)}")
+            logging.info(f"Ticker: {ticker}, Rank: {rank}, RS Score: {rs_score}")
 
         # Perform the bulk write
         if bulk_operations:
