@@ -1,6 +1,8 @@
 import pandas as pd
 from pymongo import MongoClient, UpdateOne
 import logging
+from datetime import datetime
+import numpy as np
 
 # Setup basic logging
 logging.basicConfig(
@@ -19,7 +21,7 @@ class RSScoreCalculator:
     def calculate_weighted_rs_score(self, ticker):
         """
         Calculate weighted RS score for a stock using multiple timeframes.
-        Returns only the weighted score.
+        Returns both raw and weighted scores for transparency.
         """
         try:
             # Get the latest date with RS values
@@ -64,43 +66,50 @@ class RSScoreCalculator:
                 for i in range(1, 5)
             )
             
+            # Store raw RS values for transparency
+            raw_scores = {
+                f"RS{i}": rs_data.get(f"RS{i}", 0)
+                for i in range(1, 5)
+            }
+            
             return {
                 "ticker": ticker,
                 "date": latest_date,
-                "weighted_score": weighted_score
+                "weighted_score": weighted_score,
+                "raw_scores": raw_scores
             }
             
         except Exception as e:
             logging.error(f"Error calculating RS score for {ticker}: {str(e)}")
             return None
 
-   def normalize_scores(self, scores):
-    """
-    Normalize RS scores to a 1-99 range using percentile ranking.
-    This ensures an even distribution across the range, handling non-finite values.
-    """
-    if not scores:
-        return []
-    
-    # Extract weighted scores and filter out invalid ones (e.g., NaN, inf)
-    weighted_scores = [s['weighted_score'] for s in scores if np.isfinite(s['weighted_score'])]
-    
-    if len(weighted_scores) == 0:
-        logging.error("No valid weighted scores available for normalization")
-        return []
-    
-    # Calculate percentile ranks (0 to 1) only for valid scores
-    percentile_ranks = pd.Series(weighted_scores).rank(pct=True)
-    
-    # Convert to 1-99 range
-    normalized_scores = (percentile_ranks * 98 + 1).round().astype(int)
-    
-    # Update scores with normalized values and handle non-finite cases
-    valid_scores = [s for s in scores if np.isfinite(s['weighted_score'])]
-    for score, normalized in zip(valid_scores, normalized_scores):
-        score['rs_score'] = normalized
-    
-    return valid_scores
+    def normalize_scores(self, scores):
+        """
+        Normalize RS scores to a 1-99 range using percentile ranking.
+        This ensures an even distribution across the range, handling non-finite values.
+        """
+        if not scores:
+            return []
+            
+        # Extract weighted scores and filter out invalid ones (e.g., NaN, inf)
+        weighted_scores = [s['weighted_score'] for s in scores if np.isfinite(s['weighted_score'])]
+        
+        if len(weighted_scores) == 0:
+            logging.error("No valid weighted scores available for normalization")
+            return []
+        
+        # Calculate percentile ranks (0 to 1) only for valid scores
+        percentile_ranks = pd.Series(weighted_scores).rank(pct=True)
+        
+        # Convert to 1-99 range
+        normalized_scores = (percentile_ranks * 98 + 1).round().astype(int)
+        
+        # Update scores with normalized values and handle non-finite cases
+        valid_scores = [s for s in scores if np.isfinite(s['weighted_score'])]
+        for score, normalized in zip(valid_scores, normalized_scores):
+            score['rs_score'] = normalized
+            
+        return valid_scores
 
     def update_database(self, scores):
         """Update the database with new RS scores and ranks."""
