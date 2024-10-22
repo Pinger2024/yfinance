@@ -1,91 +1,98 @@
-import yfinance as yf
-from pymongo import MongoClient
 import pandas as pd
+from pymongo import MongoClient
+import logging
 from datetime import datetime
-import numpy as np
 
-# MongoDB connection (hardcoded)
+# Setup basic logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+# MongoDB connection setup
 client = MongoClient("mongodb://mongodb-9iyq:27017")
 db = client['StockData']
 ohlcv_collection = db['ohlcv_data']
-indicators_collection = db['indicators']
 
-# Benchmark ticker for S&P 500 (^GSPC)
-benchmark_ticker = '^GSPC'
+def calculate_app_rs_score():
+    """
+    Calculate and rank RS score for APP stock.
+    """
+    try:
+        # Find the latest date with RS values for APP
+        latest_date = ohlcv_collection.find_one(
+            {"ticker": "APP", "$or": [
+                {"RS4": {"$exists": True, "$ne": None}},
+                {"RS3": {"$exists": True, "$ne": None}},
+                {"RS2": {"$exists": True, "$ne": None}},
+                {"RS1": {"$exists": True, "$ne": None}},
+            ]},
+            sort=[("date", -1)],
+            projection={"date": 1}
+        )
 
-# Function to normalize RS score to 1-99 range
-def normalize_rs_score(rs_raw, max_score, min_score):
-    return ((rs_raw - min_score) / (max_score - min_score)) * 98 + 1
+        if not latest_date:
+            logging.error("No records found with RS values for APP")
+            return
 
-# Function to calculate RS score based on multiple periods
-def calculate_rs_score(merged_df):
-    periods = [63, 126, 189, 252]
-    weights = [2, 1, 1, 1]
-    rs_values = []
+        latest_date = latest_date["date"]
+        logging.info(f"Latest trading date for RS values: {latest_date}")
 
-    for i, period in enumerate(periods):
-        n = min(len(merged_df) - 1, period)
-        if n > 0:
-            current_ticker_close = merged_df['close_ticker'].iloc[-1]
-            previous_ticker_close = merged_df['close_ticker'].iloc[-(n + 1)]
-            current_benchmark_close = merged_df['close_benchmark'].iloc[-1]
-            previous_benchmark_close = merged_df['close_benchmark'].iloc[-(n + 1)]
+        # Get RS values for APP
+        app_data = ohlcv_collection.find_one(
+            {"ticker": "APP", "date": latest_date},
+            {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
+        )
 
-            rs_value = (current_ticker_close / previous_ticker_close) - (current_benchmark_close / previous_benchmark_close)
-            rs_values.append(rs_value)
-        else:
-            rs_values.append(0.0)
+        if not app_data:
+            logging.error("No RS data found for APP on the latest date")
+            return
 
-    rs_raw = sum([rs_values[i] * weights[i] for i in range(len(rs_values))])
-    max_score = sum(weights)
-    min_score = -max_score
-    rs_score = normalize_rs_score(rs_raw, max_score, min_score)
-    rs_score = max(1, min(99, rs_score))
+        rs_value = app_data.get("RS4") or app_data.get("RS3") or app_data.get("RS2") or app_data.get("RS1")
 
-    return rs_score
+        logging.info(f"APP RS Values - RS1: {app_data.get('RS1')}, RS2: {app_data.get('RS2')}, RS3: {app_data.get('RS3')}, RS4: {app_data.get('RS4')}")
+        logging.info(f"APP RS score calculation value (highest available): {rs_value}")
 
-# Function to process historical RS scores for each ticker
-def update_historical_rs_scores():
-    tickers = ohlcv_collection.distinct('ticker')
+        # Calculate percentile rank for APP based on all stocks for the same date
+        stocks = list(ohlcv_collection.find(
+            {"date": latest_date, "$or": [
+                {"RS4": {"$exists": True, "$ne": None}},
+                {"RS3": {"$exists": True, "$ne": None}},
+                {"RS2": {"$exists": True, "$ne": None}},
+                {"RS1": {"$exists": True, "$ne": None}},
+            ]},
+            {"ticker": 1, "RS4": 1, "RS3": 1, "RS2": 1, "RS1": 1}
+        ))
 
-    # Load benchmark data from MongoDB
-    benchmark_data = list(ohlcv_collection.find({"ticker": benchmark_ticker}).sort("date", 1))
-    benchmark_df = pd.DataFrame(benchmark_data)
-    benchmark_df['date'] = pd.to_datetime(benchmark_df['date'])
+        # Sort stocks by RS value (using fallbacks) in descending order
+        stocks.sort(key=lambda x: (
+            x.get('RS4') or 
+            x.get('RS3') or 
+            x.get('RS2') or 
+            x.get('RS1') or 
+            float('-inf')
+        ), reverse=True)
 
-    for ticker in tickers:
-        print(f"Processing historical RS scores for ticker: {ticker}")
-        ticker_data = list(ohlcv_collection.find({"ticker": ticker}).sort("date", 1))
+        # Find rank of APP
+        total_stocks = len(stocks)
+        app_rank = next((i for i, stock in enumerate(stocks, 1) if stock['ticker'] == "APP"), None)
 
-        if len(ticker_data) > 0:
-            ticker_df = pd.DataFrame(ticker_data)
-            ticker_df['date'] = pd.to_datetime(ticker_df['date'])
+        if app_rank is None:
+            logging.error("APP stock not found in the ranking")
+            return
 
-            # Merge on 'date' to align the data
-            merged_df = pd.merge(ticker_df[['date', 'close']], benchmark_df[['date', 'close']], on='date', suffixes=('_ticker', '_benchmark'))
-            merged_df = merged_df.sort_values('date').reset_index(drop=True)
+        logging.info(f"APP rank: {app_rank} out of {total_stocks} stocks")
 
-            for i in range(len(merged_df)):
-                if i < 252:
-                    continue  # Skip the first 252 days as we don't have enough data for all periods
+        # Calculate RS score (percentile)
+        percentile_rank = (app_rank / total_stocks) * 100
+        rs_score = max(1, min(99, round(percentile_rank)))
 
-                # Calculate RS score for the current date
-                rs_score = calculate_rs_score(merged_df.iloc[:i+1])
+        logging.info(f"APP RS Score: {rs_score}")
 
-                # Get the date
-                date = merged_df['date'].iloc[i]
+        return rs_score
 
-                # Update or insert the RS score in MongoDB
-                ohlcv_collection.update_one(
-                    {"ticker": ticker, "date": date},
-                    {"$set": {"rs_score": rs_score}},
-                    upsert=True
-                )
-
-                print(f"Updated RS score for {ticker} on {date}: RS Score={rs_score}")
-
-        else:
-            print(f"No data found for ticker: {ticker}")
+    except Exception as e:
+        logging.error(f"Error calculating RS score for APP: {str(e)}")
 
 if __name__ == "__main__":
-    update_historical_rs_scores()
+    calculate_app_rs_score()
